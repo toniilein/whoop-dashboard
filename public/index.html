@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WHOOP Dashboard</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="/favicon.svg" alt="" width="22" height="22">
+      <span>WHOOP Dashboard</span>
+    </div>
+    <div class="who" id="who"></div>
+    <div class="actions">
+      <button type="button" class="btn ghost" id="themeBtn" aria-label="Toggle light or dark theme">Theme</button>
+      <button type="button" class="btn ghost" id="refreshBtn" hidden>Refresh</button>
+      <button type="button" class="btn ghost" id="logoutBtn" hidden>Log out</button>
+      <button type="button" class="btn ghost" id="exitDemoBtn" hidden>Exit preview</button>
+    </div>
+  </header>
+
+  <main>
+    <p class="notice error" id="errorBanner" role="alert" hidden></p>
+
+    <!-- Connect screen -->
+    <section class="connect" id="connectView" hidden>
+      <div class="card connect-card">
+        <h1>Connect your WHOOP account</h1>
+        <p class="muted">The dashboard reads recovery, sleep, strain, workouts and body measurements through the official WHOOP API. Your tokens stay on this computer.</p>
+
+        <div class="setup" id="setupNotice" hidden>
+          <h2>One-time setup in the WHOOP Developer Dashboard</h2>
+          <p>WHOOP does not recognise this app's redirect URL yet, so the login would fail.</p>
+          <ol>
+            <li>Open the <a href="https://developer-dashboard.whoop.com" target="_blank" rel="noopener noreferrer">WHOOP Developer Dashboard</a> and edit your app.</li>
+            <li>Under Redirect URLs, add this exact value:
+              <span class="copy-row"><code id="redirectValue"></code><button type="button" class="btn small" id="copyRedirect">Copy</button></span>
+            </li>
+            <li>Save, then come back here. This notice disappears once WHOOP accepts it.</li>
+          </ol>
+        </div>
+
+        <div class="connect-actions">
+          <button type="button" class="btn primary" id="connectBtn">Connect WHOOP</button>
+          <button type="button" class="btn" id="demoBtn">Preview with sample data</button>
+        </div>
+
+        <form class="manual" id="manualForm" hidden>
+          <label for="manualUrl">After approving access you land on whoop.com. Copy the full address from that tab's address bar and paste it here.</label>
+          <div class="manual-row">
+            <input id="manualUrl" type="url" placeholder="https://www.whoop.com/?code=…&amp;state=…" autocomplete="off" required>
+            <button type="submit" class="btn primary">Finish login</button>
+          </div>
+        </form>
+        <p class="notice error" id="connectError" role="alert" hidden></p>
+      </div>
+    </section>
+
+    <!-- Dashboard -->
+    <section class="dash" id="dashView" hidden>
+      <p class="notice info" id="demoBanner" hidden>You are looking at generated sample data. Connect WHOOP to see your own numbers.</p>
+
+      <div class="filters" role="toolbar" aria-label="Date range">
+        <div class="segmented" id="rangeControl">
+          <button type="button" data-days="7">7 days</button>
+          <button type="button" data-days="30">30 days</button>
+          <button type="button" data-days="90">90 days</button>
+          <button type="button" data-days="all">All time</button>
+        </div>
+        <span class="muted small" id="updatedAt"></span>
+      </div>
+
+      <section class="overview" id="overview" aria-live="polite"></section>
+      <div id="sections"></div>
+
+      <h2 class="section-title">Workouts and body</h2>
+
+      <article class="card" id="workoutsCard">
+        <header class="card-head">
+          <div>
+            <h2>Workouts</h2>
+            <p class="muted small" id="workoutsSub"></p>
+          </div>
+          <div class="legend" id="zoneLegend"></div>
+        </header>
+        <div class="table-wrap" id="workoutsTable"></div>
+      </article>
+
+      <article class="card" id="bodyCard">
+        <header class="card-head"><h2>Body</h2></header>
+        <div class="body-stats" id="bodyStats"></div>
+      </article>
+    </section>
+  </main>
+
+  <footer class="foot muted small">Data from the WHOOP Developer API. Not affiliated with WHOOP.</footer>
+</body>
+</html>

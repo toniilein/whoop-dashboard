@@ -1,0 +1,15 @@
+{
+  "name": "whoop-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local dashboard for WHOOP recovery, sleep, strain and workouts",
+  "type": "module",
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "export": "node export.js"
+  }
+}

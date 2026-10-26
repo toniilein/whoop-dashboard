@@ -1,0 +1,1566 @@
+import { renderChart, trendLines } from './charts.js';
+
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } },
+};
+
+const state = {
+  days: store.get('days') === 'all' ? 'all' : [7, 30, 90].includes(Number(store.get('days'))) ? Number(store.get('days')) : 30,
+  demo: false,
+  data: null,
+  status: null,
+  tableMode: new Set(),
+  showAllWorkouts: false,
+  requestId: 0,
+  pollTimer: null,
+};
+
+// ---------- theme ----------
+function applyTheme(t) {
+  if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+}
+applyTheme(store.get('theme'));
+$('themeBtn').addEventListener('click', () => {
+  const current = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  const next = current === 'dark' ? 'light' : 'dark';
+  applyTheme(next);
+  store.set('theme', next);
+});
+
+// ---------- formatting ----------
+const nf1 = new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const nf0 = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+const nf2 = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+const fmt = {
+  int: (v) => (v == null ? '–' : nf0.format(v)),
+  one: (v) => (v == null ? '–' : nf1.format(v)),
+  dur: (ms) => {
+    if (ms == null) return '–';
+    const m = Math.round(ms / 60000);
+    return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+  },
+  mins: (ms) => (ms == null ? '–' : `${Math.round(ms / 60000)}m`),
+  auto: (v) => (v == null ? '–' : Math.abs(v - Math.round(v)) < 1e-9 ? nf0.format(v) : nf1.format(v)),
+  sig: (v) => (Math.abs(v) < 0.1 ? nf2.format(v) : Math.abs(v) < 10 ? nf1.format(v) : nf0.format(v)),
+  compact: (v) => (v == null ? '–' : Math.abs(v) >= 1000 ? `${nf1.format(v / 1000).replace(/[.,]0$/, '')}K` : nf0.format(v)),
+  day: (iso) => new Date(`${iso}T12:00:00Z`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' }),
+  // localStart is the member's wall-clock time encoded as UTC
+  wall: (iso) => new Date(iso).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }),
+  time: (iso) => new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
+};
+const kcal = (kj) => (kj == null ? null : kj / 4.184);
+const asleepMs = (s) => (s && s.lightMs != null ? (s.lightMs || 0) + (s.swsMs || 0) + (s.remMs || 0) : null);
+const hrs = (ms) => (ms == null ? null : ms / 3_600_000);
+const mean = (arr) => {
+  const v = arr.filter((x) => x != null && Number.isFinite(x));
+  return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+};
+function todayIso() {
+  const t = new Date();
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+}
+const isAll = () => state.days === 'all';
+const rangeName = () => (isAll() ? 'all-time' : `${state.days}-day`);
+const fmtDate = (iso, opts) => new Date(`${iso}T12:00:00Z`).toLocaleDateString(undefined, { ...opts, timeZone: 'UTC' });
+const fmtMonthYear = (iso) => fmtDate(iso, { month: 'short', year: 'numeric' });
+
+// Long ranges are grouped into weekly (or monthly) averages so every bar stays readable.
+function weekStart(iso) {
+  const t = new Date(`${iso}T12:00:00Z`);
+  t.setUTCDate(t.getUTCDate() - ((t.getUTCDay() + 6) % 7)); // back to Monday
+  return t.toISOString().slice(0, 10);
+}
+function aggregate(days) {
+  if (days.length <= 120) return { rows: days, unit: 'day' };
+  const unit = days.length > 3 * 365 ? 'month' : 'week';
+  const groups = new Map();
+  for (const d of days) {
+    const key = unit === 'month' ? `${d.date.slice(0, 7)}-01` : weekStart(d.date);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(d);
+  }
+  const rows = [...groups].map(([date, ds]) => {
+    const avg = (f) => mean(ds.map(f));
+    const done = (f) => (x) => (x.inProgress ? null : f(x)); // today's partial strain would drag the average down
+    return {
+      date,
+      bucket: unit,
+      bucketDays: ds.length,
+      inProgress: false,
+      strain: avg(done((x) => x.strain)),
+      kilojoule: avg(done((x) => x.kilojoule)),
+      avgHr: avg(done((x) => x.avgHr)),
+      maxHr: avg(done((x) => x.maxHr)),
+      steps: avg(done((x) => x.steps)),
+      ins: ds.some((x) => x.ins)
+        ? (() => {
+            const worst = ds.reduce((w, x) => ((x.ins?.signalCount ?? -1) > (w?.ins?.signalCount ?? -1) ? x : w), null);
+            return {
+              hrv7: avg((x) => x.ins?.hrv7),
+              hrvLo: avg((x) => x.ins?.hrvLo),
+              hrvHi: avg((x) => x.ins?.hrvHi),
+              acwr: avg((x) => x.ins?.acwr),
+              acute: avg((x) => x.ins?.acute),
+              chronic: avg((x) => x.ins?.chronic),
+              bedMin: avg((x) => x.ins?.bedMin),
+              wakeMin: avg((x) => x.ins?.wakeMin),
+              signalCount: worst?.ins?.signalCount ?? null,
+              signals: worst?.ins?.signals || [],
+              illness: worst?.ins?.illness ?? null,
+            };
+          })()
+        : null,
+      act: ['workouts', 'zone13Ms', 'zone45Ms', 'strengthMs'].reduce((o, k) => ((o[k] = ds.reduce((a, x) => a + (x.act?.[k] || 0), 0)), o), {}),
+      recovery: ds.some((x) => x.recovery)
+        ? {
+            score: avg((x) => x.recovery?.score),
+            hrv: avg((x) => x.recovery?.hrv),
+            rhr: avg((x) => x.recovery?.rhr),
+            spo2: avg((x) => x.recovery?.spo2),
+            skinTemp: avg((x) => x.recovery?.skinTemp),
+            calibrating: false,
+          }
+        : null,
+      sleep: ds.some((x) => x.sleep)
+        ? {
+            swsMs: avg((x) => x.sleep?.swsMs),
+            remMs: avg((x) => x.sleep?.remMs),
+            lightMs: avg((x) => x.sleep?.lightMs),
+            awakeMs: avg((x) => x.sleep?.awakeMs),
+            performance: avg((x) => x.sleep?.performance),
+            efficiency: avg((x) => x.sleep?.efficiency),
+            consistency: avg((x) => x.sleep?.consistency),
+            neededMs: avg((x) => x.sleep?.neededMs),
+            debtMs: avg((x) => x.sleep?.debtMs),
+            inBedMs: avg((x) => x.sleep?.inBedMs),
+            respiratoryRate: avg((x) => x.sleep?.respiratoryRate),
+            disturbances: avg((x) => x.sleep?.disturbances),
+          }
+        : null,
+    };
+  });
+  return { rows, unit };
+}
+function periodLabel(d, short = false) {
+  if (d.bucket === 'week') {
+    const day = fmtDate(d.date, { month: 'short', day: 'numeric', year: 'numeric' });
+    return short ? day : `Week of ${day}`;
+  }
+  if (d.bucket === 'month') return fmtDate(d.date, { month: 'long', year: 'numeric' });
+  return fmt.day(d.date);
+}
+
+function h(tag, props = {}, ...children) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (v == null || v === false) continue;
+    if (k === 'class') n.className = v;
+    else if (k === 'text') n.textContent = v;
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of children.flat()) if (c != null && c !== false) n.append(c.nodeType ? c : document.createTextNode(String(c)));
+  return n;
+}
+
+// WHOOP recovery zones: green 67–100, yellow 34–66, red 0–33
+function zoneOf(score) {
+  if (score == null) return null;
+  if (score >= 67) return { key: 'good', label: 'Green', color: 'var(--good)' };
+  if (score >= 34) return { key: 'warning', label: 'Yellow', color: 'var(--warning)' };
+  return { key: 'critical', label: 'Red', color: 'var(--critical)' };
+}
+const statusIcon = (key) => h('span', { class: `status-icon status-${key}`, 'aria-hidden': 'true' });
+
+// ---------- views ----------
+function showView(name) {
+  $('connectView').hidden = name !== 'connect';
+  $('dashView').hidden = name !== 'dash';
+  const real = name === 'dash' && !state.demo;
+  $('refreshBtn').hidden = !real;
+  $('logoutBtn').hidden = !real;
+  $('exitDemoBtn').hidden = !(name === 'dash' && state.demo);
+  if (name !== 'connect') stopPolling();
+}
+
+function showError(msg) {
+  $('errorBanner').textContent = msg;
+  $('errorBanner').hidden = !msg;
+}
+
+async function getJSON(url, opts) {
+  const res = await fetch(url, opts);
+  const body = await res.json().catch(() => ({}));
+  return { res, body };
+}
+
+// ---------- connect flow ----------
+function renderConnect(message) {
+  const st = state.status || {};
+  state.demo = false;
+  $('who').textContent = '';
+  showView('connect');
+  showError('');
+  const needsSetup = !st.manualMode && st.redirectRegistered === false;
+  $('setupNotice').hidden = !needsSetup;
+  $('redirectValue').textContent = st.redirectUri || '';
+  $('connectError').textContent = message || '';
+  $('connectError').hidden = !message;
+  if (!st.configured) {
+    $('connectError').textContent = 'Missing WHOOP_CLIENT_ID or WHOOP_CLIENT_SECRET in .env. Add them and restart the server.';
+    $('connectError').hidden = false;
+  }
+  $('connectBtn').disabled = !st.configured;
+  if (needsSetup) startPolling();
+}
+
+function startPolling() {
+  stopPolling();
+  state.pollTimer = setInterval(async () => {
+    const { body } = await getJSON('/api/status').catch(() => ({ body: null }));
+    if (!body) return;
+    state.status = body;
+    if (body.redirectRegistered !== false) {
+      $('setupNotice').hidden = true;
+      stopPolling();
+    }
+  }, 15_000);
+}
+function stopPolling() {
+  clearInterval(state.pollTimer);
+  state.pollTimer = null;
+}
+
+$('copyRedirect').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('redirectValue').textContent);
+    $('copyRedirect').textContent = 'Copied';
+    setTimeout(() => ($('copyRedirect').textContent = 'Copy'), 1600);
+  } catch {
+    $('copyRedirect').textContent = 'Select and copy';
+  }
+});
+
+$('connectBtn').addEventListener('click', () => {
+  if (state.status?.manualMode) {
+    window.open('/login', '_blank', 'noopener');
+    $('manualForm').hidden = false;
+    $('manualUrl').focus();
+  } else {
+    location.href = '/login';
+  }
+});
+
+$('manualForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = e.submitter;
+  if (btn) btn.disabled = true;
+  try {
+    const { res, body } = await getJSON('/api/manual-callback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ redirectedUrl: $('manualUrl').value }),
+    });
+    if (!res.ok) throw new Error(body.message || 'Login failed');
+    $('manualUrl').value = '';
+    $('manualForm').hidden = true;
+    state.status = { ...state.status, connected: true };
+    await openDashboard();
+  } catch (err) {
+    $('connectError').textContent = err.message;
+    $('connectError').hidden = false;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+
+$('demoBtn').addEventListener('click', () => {
+  state.demo = true;
+  openDashboard();
+});
+$('exitDemoBtn').addEventListener('click', () => {
+  state.demo = false;
+  state.data = null;
+  renderConnect();
+});
+$('logoutBtn').addEventListener('click', async () => {
+  await fetch('/api/logout', { method: 'POST' });
+  state.data = null;
+  state.status = { ...state.status, connected: false };
+  renderConnect('You are logged out. Your login and cached WHOOP history were removed from this computer. Files in the exports folder are kept.');
+});
+$('refreshBtn').addEventListener('click', () => load({ fresh: true }));
+
+// ---------- range filter ----------
+function syncRange() {
+  for (const b of $('rangeControl').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.days === String(state.days)));
+}
+$('rangeControl').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-days]');
+  if (!b) return;
+  state.days = b.dataset.days === 'all' ? 'all' : Number(b.dataset.days);
+  store.set('days', String(state.days));
+  syncRange();
+  load();
+});
+
+// ---------- loading ----------
+function setLoading(on) {
+  for (const n of document.querySelectorAll('.chart-host, .table-wrap, .overview, .tiles')) n.classList.toggle('loading', on);
+  $('refreshBtn').disabled = on;
+}
+
+async function openDashboard() {
+  showView('dash');
+  syncRange();
+  await load();
+}
+
+async function load({ fresh = false } = {}) {
+  const id = ++state.requestId;
+  setLoading(true);
+  if (isAll() && !state.demo) $('updatedAt').textContent = 'Loading full history…';
+  try {
+    const url = state.demo ? `/api/demo?days=${state.days}` : `/api/dashboard?days=${state.days}${fresh ? '&fresh=1' : ''}`;
+    const { res, body } = await getJSON(url);
+    if (id !== state.requestId) return; // a newer request superseded this one
+    if (res.status === 401) {
+      state.data = null;
+      state.status = { ...state.status, connected: false };
+      renderConnect(body.message || 'Your WHOOP session ended. Please connect again.');
+      return;
+    }
+    if (!res.ok) throw new Error(body.message || `Request failed (${res.status})`);
+    state.data = body;
+    showError('');
+    render();
+  } catch (err) {
+    if (id === state.requestId) showError(`Could not load WHOOP data. ${err.message}`);
+  } finally {
+    if (id === state.requestId) setLoading(false);
+  }
+}
+
+// ---------- dashboard rendering ----------
+const STRENGTH = /weight|power|strength|functional|crossfit|bodybuild|kettlebell|calisthenic/i;
+const EMPTY_ACT = { workouts: 0, zone13Ms: 0, zone45Ms: 0, strengthMs: 0 };
+const restorativeMs = (s) => (s && s.swsMs != null ? (s.swsMs || 0) + (s.remMs || 0) : null);
+const minutes = (ms) => (ms == null ? null : ms / 60_000);
+const fmtMin = (m) => {
+  if (m == null || !Number.isFinite(m)) return '–';
+  const r = Math.round(m);
+  return r >= 60 ? `${Math.floor(r / 60)}h ${String(r % 60).padStart(2, '0')}m` : `${r}m`;
+};
+// Uth–Sørensen estimate: VO2 max ≈ 15.3 × max HR ÷ resting HR (ml/kg/min). Not WHOOP's own method.
+const vo2 = (maxHr, rhr) => (maxHr && rhr ? (15.3 * maxHr) / rhr : null);
+let currentUnit = 'day';
+let currentSpanDays = 30;
+
+// How each chart's trend slope is written, per period (absolute value; the sign is added separately).
+const minSig = (m) => (Math.abs(m) < 1 ? `${fmt.sig(m)}m` : fmtMin(m));
+const TREND_FMT = {
+  recovery: (v) => `${fmt.sig(v)} pts`,
+  hrv: (v) => `${fmt.sig(v)} ms`,
+  rhr: (v) => `${fmt.sig(v)} bpm`,
+  resp: (v) => `${fmt.sig(v)} breaths/min`,
+  spo2: (v) => `${fmt.sig(v)} pts`,
+  skin: (v) => `${fmt.sig(v)} °C`,
+  sleep: (v) => minSig(v * 60),
+  sleepNeed: (v) => minSig(v * 60),
+  sleepPerf: (v) => `${fmt.sig(v)} pts`,
+  sleepQuality: (v) => `${fmt.sig(v)} pts`,
+  strain: (v) => fmt.sig(v),
+  steps: (v) => `${fmt.int(v)} steps`,
+  zones: (v) => minSig(v),
+  strength: (v) => minSig(v),
+  vo2: (v) => `${fmt.sig(v)} ml/kg/min`,
+  hrvBase: (v) => `${fmt.sig(v)} ms`,
+  illness: (v) => `${fmt.sig(v)} signals`,
+  load: (v) => fmt.sig(v),
+  sleepTiming: (v) => minSig(v),
+};
+function trendText(id, spec) {
+  const trends = trendLines(spec);
+  if (!trends.length) return null;
+  const period = currentSpanDays <= 31 ? ['week', 7] : currentSpanDays <= 366 ? ['month', 30.44] : ['year', 365.25];
+  const daysPerRow = currentUnit === 'day' ? 1 : currentUnit === 'week' ? 7 : 30.44;
+  const f = TREND_FMT[id] || ((v) => fmt.sig(v));
+  const part = (t) => {
+    const v = (t.slope / daysPerRow) * period[1];
+    const shown = f(Math.abs(v));
+    if (/^0([.,]0+)?( |m|$)/.test(shown)) return 'flat';
+    return `${v > 0 ? '+' : '−'}${shown}`;
+  };
+  if (trends.length === 1) return `${spec.type === 'stack' ? 'Total trend' : 'Trend'} ${part(trends[0])} per ${period[0]}`;
+  return `Trend per ${period[0]}: ${trends.map((t) => `${t.label.toLowerCase()} ${part(t)}`).join(', ')}`;
+}
+
+// Attach per-day workout totals (heart-rate zone time, strength time) by the member's local date.
+function withActivity(days, workouts) {
+  const byDate = new Map();
+  for (const w of workouts) {
+    const date = w.localStart.slice(0, 10);
+    const a = byDate.get(date) || { ...EMPTY_ACT };
+    a.workouts += 1;
+    if (w.zonesMs) {
+      a.zone13Ms += w.zonesMs[1] + w.zonesMs[2] + w.zonesMs[3];
+      a.zone45Ms += w.zonesMs[4] + w.zonesMs[5];
+    }
+    if (STRENGTH.test(w.sport)) a.strengthMs += w.durationMs || 0;
+    byDate.set(date, a);
+  }
+  return days.map((d) => ({ ...d, act: byDate.get(d.date) || { ...EMPTY_ACT } }));
+}
+
+function render() {
+  const d = state.data;
+  $('demoBanner').hidden = !d.demo;
+  const p = d.profile;
+  $('who').textContent = p ? `${p.firstName} ${p.lastName}`.trim() + (d.demo ? ' (sample)' : '') : '';
+  const since = d.history?.firstDate ? ` · history since ${fmtDate(d.history.firstDate, { month: 'short', day: 'numeric', year: 'numeric' })}` : '';
+  $('updatedAt').textContent = `Updated ${fmt.time(d.generatedAt)}${since}`;
+  const insByDate = d.insights?.byDate || {};
+  const days = withActivity(d.days, d.workouts).map((x) => ({ ...x, ins: insByDate[x.date] || null }));
+  const { rows, unit } = aggregate(days);
+  const ctx = { days, rows, unit, maxHr: d.body?.maxHr ?? null, insights: d.insights || null };
+  renderOverview(ctx);
+  renderSections(ctx);
+  renderWorkouts(d.workouts);
+  renderBody(d.body);
+}
+
+function latest(days, pick) {
+  for (let i = days.length - 1; i >= 0; i--) if (pick(days[i]) != null) return { day: days[i], index: i };
+  return null;
+}
+const dayLabel = (iso) => (iso === todayIso() ? 'Today' : fmt.day(iso));
+
+// ---------- overview: recovery, strain, sleep ----------
+function meterEl(pct, color, label) {
+  const fill = h('span');
+  fill.style.width = `${Math.max(2, Math.min(100, pct))}%`;
+  fill.style.background = color;
+  const m = h('div', { class: 'meter', role: 'img', 'aria-label': label }, fill);
+  m.style.background = `color-mix(in srgb, ${color} 18%, var(--surface))`;
+  return m;
+}
+const strainLevel = (s) => (s >= 18 ? 'All out' : s >= 14 ? 'High' : s >= 10 ? 'Moderate' : 'Light');
+function sleepZone(p) {
+  if (p >= 85) return { key: 'good', label: 'Optimal', color: 'var(--good)' };
+  if (p >= 70) return { key: 'warning', label: 'Sufficient', color: 'var(--warning)' };
+  return { key: 'critical', label: 'Poor', color: 'var(--critical)' };
+}
+function overviewCard({ label, value, unit, chip, meter, sub, empty }) {
+  const card = h('article', { class: 'card ov-card' });
+  if (empty) {
+    card.append(h('span', { class: 'label', text: label }), h('p', { class: 'muted', text: empty }));
+    return card;
+  }
+  card.append(
+    h('span', { class: 'label', text: label }),
+    h('div', { class: 'value' }, value, unit ? h('span', { class: 'unit', text: unit }) : null),
+    chip,
+    meter,
+    sub ? h('span', { class: 'sub', text: sub }) : null,
+  );
+  return card;
+}
+function renderOverview({ days }) {
+  const cards = [];
+  const rec = latest(days, (d) => d.recovery?.score);
+  if (rec) {
+    const r = rec.day.recovery;
+    const z = zoneOf(r.score);
+    cards.push(overviewCard({
+      label: `Recovery · ${dayLabel(rec.day.date)}`,
+      value: String(Math.round(r.score)),
+      unit: '%',
+      chip: h('span', { class: 'zone-chip' }, statusIcon(z.key), `${z.label} recovery${r.calibrating ? ' · calibrating' : ''}`),
+      meter: meterEl(r.score, z.color, `Recovery ${Math.round(r.score)} percent`),
+      sub: `HRV ${fmt.int(r.hrv)} ms · Resting HR ${fmt.int(r.rhr)} bpm`,
+    }));
+  } else cards.push(overviewCard({ label: 'Recovery', empty: 'No scored recovery in this range yet.' }));
+
+  const str = latest(days, (d) => d.strain);
+  if (str) {
+    const d = str.day;
+    cards.push(overviewCard({
+      label: `Strain · ${dayLabel(d.date)}${d.inProgress ? ' so far' : ''}`,
+      value: fmt.one(d.strain),
+      unit: '/ 21',
+      chip: h('span', { class: 'zone-chip', text: `${strainLevel(d.strain)} strain` }),
+      meter: meterEl((d.strain / 21) * 100, 'var(--series-1)', `Strain ${fmt.one(d.strain)} of 21`),
+      sub: `${fmt.int(kcal(d.kilojoule))} kcal · avg HR ${fmt.int(d.avgHr)} bpm${d.steps != null ? ` · ${fmt.int(d.steps)} steps` : ''}`,
+    }));
+  } else cards.push(overviewCard({ label: 'Strain', empty: 'No strain recorded in this range yet.' }));
+
+  const slp = latest(days, (d) => d.sleep?.performance);
+  if (slp) {
+    const s = slp.day.sleep;
+    const z = sleepZone(s.performance);
+    cards.push(overviewCard({
+      label: `Sleep · ${dayLabel(slp.day.date)}`,
+      value: fmt.int(s.performance),
+      unit: '%',
+      chip: h('span', { class: 'zone-chip' }, statusIcon(z.key), `${z.label} sleep`),
+      meter: meterEl(s.performance, z.color, `Sleep performance ${fmt.int(s.performance)} percent`),
+      sub: `${fmt.dur(asleepMs(s))} asleep of ${fmt.dur(s.neededMs)} needed`,
+    }));
+  } else cards.push(overviewCard({ label: 'Sleep', empty: 'No scored sleep in this range yet.' }));
+  $('overview').replaceChildren(...cards);
+}
+
+// ---------- KPI tiles ----------
+function deltaEl(value, avg, def, vsText) {
+  const delta = h('span', { class: 'delta' });
+  if (avg == null || value == null) {
+    delta.textContent = def.kind === 'week' ? 'Choose a longer range to compare' : 'Not enough history';
+    return delta;
+  }
+  const diff = value - avg;
+  const shown = def.diff(diff);
+  if (/^0([.,]0)?( pts|m)?$/.test(shown)) {
+    delta.textContent = `Same as ${vsText}`;
+    return delta;
+  }
+  const up = diff > 0;
+  const cls = def.better == null ? 'neutral' : up === (def.better === 'up') ? (up ? 'up-good' : 'down-good') : up ? 'up-bad' : 'down-bad';
+  delta.append(h('span', { class: cls, text: `${up ? '▲' : '▼'} ${shown}` }), ` vs ${vsText}`);
+  return delta;
+}
+
+function tileEl(def, days) {
+  const tile = h('article', { class: 'card tile' });
+  let label = def.label;
+  let value = null;
+  let avg = null;
+  let sub = null;
+  let partialText = null;
+  let status = null;
+  let vs = `${rangeName()} avg`;
+  if (def.kind === 'week') {
+    const end = days.at(-1)?.date;
+    if (end) {
+      const cutoff = new Date(Date.parse(`${end}T12:00:00Z`) - 6 * 86_400_000).toISOString().slice(0, 10);
+      value = days.filter((d) => d.date >= cutoff).reduce((a, d) => a + (def.get(d) || 0), 0);
+      const total = days.reduce((a, d) => a + (def.get(d) || 0), 0);
+      avg = days.length >= 14 ? (total / days.length) * 7 : null;
+    }
+    label = `${def.label} · last 7 days`;
+    vs = `${rangeName()} weekly avg`;
+  } else if (def.kind === 'custom') {
+    ({ value = null, avg = null, sub = null, status = null } = def.compute(days));
+  } else {
+    const hit = latest(days, def.get);
+    if (hit) {
+      value = def.get(hit.day);
+      if (hit.day.date !== todayIso()) label += ` · ${fmt.day(hit.day.date)}`;
+      sub = def.sub?.(hit.day) || null;
+      avg = mean(days.filter((x, i) => i !== hit.index && !(def.partial && x.inProgress)).map(def.get));
+      if (def.partial && hit.day.inProgress) partialText = `So far today · avg ${def.show(avg)}`;
+    }
+  }
+  if (value == null) {
+    tile.append(h('span', { class: 'label', text: def.label }), h('span', { class: 'value', text: '–' }), h('span', { class: 'delta', text: def.emptyText || 'No data in this range' }));
+    return tile;
+  }
+  tile.append(
+    h('span', { class: 'label', text: label }),
+    h('span', { class: 'value' }, def.show(value), def.unit ? h('span', { class: 'unit', text: def.unit }) : null),
+  );
+  if (sub) tile.append(h('span', { class: 'tile-sub', text: sub }));
+  if (status) {
+    tile.append(h('span', { class: 'delta status-line' }, statusIcon(status.key), status.text));
+    return tile;
+  }
+  if (def.noDelta) return tile;
+  tile.append(partialText ? h('span', { class: 'delta', text: partialText }) : deltaEl(value, avg, def, vs));
+  return tile;
+}
+
+const num1 = (v) => fmt.one(Math.abs(v));
+const int0 = (v) => fmt.int(Math.abs(v));
+const minsDiff = (v) => fmt.mins(Math.abs(v));
+
+// ---------- chart cards ----------
+function legendEl(items) {
+  return h('div', { class: 'legend' }, items.map((it) => {
+    const key = it.icon ? statusIcon(it.icon) : h('span', { class: it.shape ? `swatch ${it.shape}` : 'swatch' });
+    if (!it.icon) key.style.setProperty('--key', it.color);
+    return h('span', { class: 'item' }, key, it.label);
+  }));
+}
+
+function tableEl(rows, columns) {
+  const thead = h('thead', {}, h('tr', {}, columns.map((c) => h('th', { class: c.num ? 'num' : null, scope: 'col', text: c.label }))));
+  const tbody = h('tbody', {}, [...rows].reverse().map((r) => h('tr', {}, columns.map((c) => h('td', { class: c.num ? 'num' : null, text: c.value(r) })))));
+  return h('div', { class: 'table-wrap data-table' }, h('table', {}, thead, tbody));
+}
+
+function chartCard({ id, title, subtitle, legend, spec, columns, totals = false, peak = false }) {
+  const period = currentUnit === 'week' ? 'week' : 'month';
+  const note = currentUnit === 'day' ? '' : peak ? ` · highest day each ${period}` : ` · ${period}ly ${totals ? 'totals' : 'averages'}`;
+  if (currentUnit !== 'day') spec.xFormat = fmtMonthYear;
+  const tText = trendText(id, spec);
+  let trendNote = null;
+  if (tText) {
+    const key = h('span', { class: 'swatch trend' });
+    key.style.setProperty('--key', spec.type === 'line' && spec.series.length === 1 ? spec.series[0].color : 'var(--text-secondary)');
+    trendNote = h('p', { class: 'trend-note small' }, key, tText);
+  }
+  const host = h('div', { class: 'chart-host' });
+  const tableHost = h('div');
+  const isTable = state.tableMode.has(id);
+  const toggle = h('button', { type: 'button', class: 'linkbtn', 'aria-pressed': String(isTable), text: isTable ? 'Show chart' : 'Show table' });
+  const card = h('article', { class: 'card chart-card', 'aria-labelledby': `${id}-title` },
+    h('header', { class: 'card-head' },
+      h('div', {},
+        h('h3', { id: `${id}-title`, text: title }),
+        subtitle ? h('p', { class: 'muted small', text: subtitle + note }) : null,
+        trendNote,
+      ),
+      h('div', { class: 'card-tools' }, legend ? legendEl(legend) : null, toggle),
+    ),
+    host,
+    tableHost,
+  );
+  const apply = () => {
+    const tableOn = state.tableMode.has(id);
+    toggle.textContent = tableOn ? 'Show chart' : 'Show table';
+    toggle.setAttribute('aria-pressed', String(tableOn));
+    host.hidden = tableOn;
+    tableHost.replaceChildren(tableOn ? tableEl(spec.data, columns) : '');
+    if (!tableOn) renderChart(host, spec);
+  };
+  toggle.addEventListener('click', () => {
+    if (state.tableMode.has(id)) state.tableMode.delete(id);
+    else state.tableMode.add(id);
+    apply();
+  });
+  return { card, apply };
+}
+
+// Single-series line chart with the common table + tooltip wiring.
+function lineCard({ id, title, subtitle, rows, value, color, label, show, yTicks, yFloor }) {
+  return {
+    id,
+    title,
+    subtitle,
+    spec: {
+      type: 'line',
+      data: rows,
+      x: (d) => d.date,
+      series: [{ label, value, color }],
+      yTicks,
+      yFloor,
+      yFormat: show,
+      ariaLabel: `${title} line chart`,
+      tooltip: (d) => ({ title: periodLabel(d), rows: [{ color, value: value(d) == null ? 'No data' : show(value(d)), label }] }),
+    },
+    columns: [
+      { label: currentUnit === 'day' ? 'Date' : currentUnit === 'week' ? 'Week of' : 'Month', value: (d) => periodLabel(d, true) },
+      { label, num: true, value: (d) => (value(d) == null ? '–' : show(value(d))) },
+    ],
+  };
+}
+
+function healthspanCard({ days, maxHr }) {
+  const weeks = Math.max(1, days.length / 7);
+  const sum = (f) => days.reduce((a, d) => a + (f(d) || 0), 0);
+  const rhrs = days.map((d) => d.recovery?.rhr).filter((v) => v != null);
+  const v = vo2(maxHr, mean(rhrs.slice(-30)));
+  const items = [
+    ['Sleep consistency', mean(days.map((d) => d.sleep?.consistency)) == null ? '–' : `${fmt.int(mean(days.map((d) => d.sleep?.consistency)))}%`, 'Average'],
+    ['Hours of sleep', fmt.dur(mean(days.map((d) => asleepMs(d.sleep)))), 'Average per night'],
+    ['Time in HR zones 1–3', fmtMin(minutes(sum((d) => d.act.zone13Ms)) / weeks), 'Per week, during recorded activities'],
+    ['Time in HR zones 4–5', fmtMin(minutes(sum((d) => d.act.zone45Ms)) / weeks), 'Per week, during recorded activities'],
+    ['Strength activity time', fmtMin(minutes(sum((d) => d.act.strengthMs)) / weeks), 'Per week'],
+    ['Daily steps', fmt.int(mean(days.map((d) => (d.inProgress ? null : d.steps)))), 'Average per day'],
+    ['VO2 max', v == null ? '–' : `${fmt.one(v)} ml/kg/min`, 'Estimate, last 30 days'],
+    ['Resting heart rate', rhrs.length ? `${fmt.int(mean(rhrs))} bpm` : '–', 'Average'],
+    ['Lean body mass', '–', 'Only in the WHOOP app'],
+  ];
+  const tbody = h('tbody', {}, items.map(([m, val, basis]) => h('tr', {}, h('td', { text: m }), h('td', { class: 'num', text: val }), h('td', { class: 'muted', text: basis }))));
+  return h('article', { class: 'card' },
+    h('header', { class: 'card-head' }, h('div', {},
+      h('h3', { text: 'Healthspan inputs' }),
+      h('p', { class: 'muted small', text: `The nine metrics WHOOP uses to calculate WHOOP Age, for the ${isAll() ? 'whole history' : `last ${state.days} days`}. WHOOP Age itself is not available through the API.` }),
+    )),
+    h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, h('th', { scope: 'col', text: 'Metric' }), h('th', { scope: 'col', class: 'num', text: 'Value' }), h('th', { scope: 'col', text: 'Basis' }))),
+      tbody)),
+  );
+}
+
+const APP_ONLY = [
+  ['WHOOP Age and Pace of Aging', 'Healthspan scores built from the inputs above'],
+  ['VO2 max, WHOOP’s own value', 'This dashboard shows an estimate instead'],
+  ['Stress Monitor', 'Real-time stress score from 0 to 3'],
+  ['Strain target', 'Daily strain goal based on your recovery'],
+  ['Strength Trainer', 'Muscular load from logged exercises'],
+  ['Journal and behaviors', 'Habits and their effect on recovery'],
+  ['Lean body mass', 'One of the nine Healthspan inputs'],
+  ['Blood pressure and ECG', 'WHOOP MG features'],
+];
+function appOnlyCard() {
+  return h('article', { class: 'card' },
+    h('header', { class: 'card-head' }, h('div', {},
+      h('h3', { text: 'Only in the WHOOP app' }),
+      h('p', { class: 'muted small', text: 'The WHOOP developer API does not share these, so they cannot appear here.' }),
+    )),
+    h('ul', { class: 'app-only' }, APP_ONLY.map(([name, what]) => h('li', {}, h('strong', { text: name }), h('span', { class: 'muted', text: what })))),
+  );
+}
+
+// ---------- insights: HRV baseline, illness warning, training load, sleep timing, year over year ----------
+// Clock values are minutes since 18:00 local (see lib/insights.js).
+const fmtClock = (m) => {
+  if (m == null || !Number.isFinite(m)) return '–';
+  const total = Math.round(m + 18 * 60) % 1440;
+  return new Date(Date.UTC(2000, 0, 1, Math.floor(total / 60), total % 60)).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' });
+};
+const signedMin = (m) => `${m >= 0 ? '+' : '−'}${fmtMin(Math.abs(m))}`;
+const sdOf = (arr) => {
+  const v = arr.filter((x) => x != null && Number.isFinite(x));
+  if (v.length < 2) return null;
+  const m = v.reduce((a, b) => a + b, 0) / v.length;
+  return Math.sqrt(v.reduce((a, x) => a + (x - m) ** 2, 0) / (v.length - 1));
+};
+const LOAD_STATUS = {
+  low: { key: 'warning', text: 'Below 0.8: lighter than your usual load' },
+  optimal: { key: 'good', text: 'In the 0.8–1.3 range' },
+  high: { key: 'warning', text: '1.3–1.5: ramping up quickly' },
+  'very high': { key: 'critical', text: 'Above 1.5: sharp jump in load' },
+};
+const ILLNESS = {
+  clear: { key: 'good', label: 'Clear' },
+  watch: { key: 'warning', label: 'Watch' },
+  warning: { key: 'critical', label: 'Warning' },
+};
+const sinceLabel = (iso) => (iso === todayIso() ? '' : ` · ${fmt.day(iso)}`);
+
+function sleepTiming(days) {
+  const nights = days.filter((d) => d.ins?.bedMin != null && d.ins?.wakeMin != null);
+  if (nights.length < 3) return null;
+  const isWeekend = (d) => [0, 6].includes(new Date(`${d.date}T12:00:00Z`).getUTCDay()); // woke Sat/Sun
+  const mid = (d) => (d.ins.bedMin + d.ins.wakeMin) / 2;
+  const we = nights.filter(isWeekend).map(mid);
+  const wd = nights.filter((d) => !isWeekend(d)).map(mid);
+  return {
+    nights: nights.length,
+    bed: mean(nights.map((d) => d.ins.bedMin)),
+    bedSd: sdOf(nights.map((d) => d.ins.bedMin)),
+    wake: mean(nights.map((d) => d.ins.wakeMin)),
+    wakeSd: sdOf(nights.map((d) => d.ins.wakeMin)),
+    weekendShift: we.length >= 2 && wd.length >= 3 ? mean(we) - mean(wd) : null,
+  };
+}
+
+const YOY_ROWS = [
+  { label: 'Recovery', key: 'recovery', show: (v) => `${fmt.int(v)}%`, diff: (v) => `${fmt.int(v)} pts`, better: 'up' },
+  { label: 'HRV', key: 'hrv', show: (v) => `${fmt.int(v)} ms`, diff: (v) => `${fmt.one(v)} ms`, better: 'up' },
+  { label: 'Resting heart rate', key: 'rhr', show: (v) => `${fmt.one(v)} bpm`, diff: (v) => `${fmt.one(v)} bpm`, better: 'down' },
+  { label: 'Hours of sleep', key: 'sleepHours', show: (v) => fmt.dur(v * 3_600_000), diff: (v) => fmtMin(v * 60), better: 'up' },
+  { label: 'Sleep performance', key: 'sleepPerformance', show: (v) => `${fmt.int(v)}%`, diff: (v) => `${fmt.int(v)} pts`, better: 'up' },
+  { label: 'Day strain', key: 'strain', show: fmt.one, diff: fmt.one, better: null },
+  { label: 'Steps per day', key: 'steps', show: fmt.int, diff: fmt.int, better: 'up' },
+  { label: 'Workouts per week', key: 'workoutsPerWeek', show: fmt.one, diff: fmt.one, better: 'up' },
+  { label: 'VO2 max estimate', key: 'vo2', show: (v) => fmt.one(v), diff: fmt.one, better: 'up' },
+];
+function changeEl(now, before, row) {
+  if (now == null || before == null) return h('span', { class: 'muted', text: '–' });
+  const diff = now - before;
+  const shown = row.diff(Math.abs(diff));
+  if (/^0([.,]0)?( |m|$)/.test(shown)) return h('span', { class: 'chg-neutral', text: 'Same' });
+  const up = diff > 0;
+  const cls = row.better == null ? 'chg-neutral' : up === (row.better === 'up') ? (up ? 'chg-up-good' : 'chg-down-good') : up ? 'chg-up-bad' : 'chg-down-bad';
+  return h('span', { class: cls, text: `${up ? '▲' : '▼'} ${shown}` });
+}
+function yoyCard(yoy) {
+  const card = h('article', { class: 'card wide' },
+    h('header', { class: 'card-head' }, h('div', {},
+      h('h3', { text: 'Year over year' }),
+      h('p', { class: 'muted small', text: 'The last 30 days against the same 30 days a year earlier, and your averages by calendar year.' }),
+    )));
+  if (!yoy) {
+    card.append(h('p', { class: 'muted', text: 'Not enough history yet.' }));
+    return card;
+  }
+  const range = (p) => `${fmtDate(p.from, { month: 'short', day: 'numeric' })} – ${fmtDate(p.to, { month: 'short', day: 'numeric', year: 'numeric' })}`;
+  const recentTable = yoy.prior
+    ? h('table', {},
+        h('thead', {}, h('tr', {},
+          h('th', { scope: 'col', text: 'Metric' }),
+          h('th', { scope: 'col', class: 'num' }, 'Last 30 days', h('span', { class: 'th-note', text: range(yoy.recent) })),
+          h('th', { scope: 'col', class: 'num' }, 'A year earlier', h('span', { class: 'th-note', text: range(yoy.prior) })),
+          h('th', { scope: 'col', class: 'num', text: 'Change' }),
+        )),
+        h('tbody', {}, YOY_ROWS.map((r) => h('tr', {},
+          h('td', { text: r.label }),
+          h('td', { class: 'num', text: yoy.recent[r.key] == null ? '–' : r.show(yoy.recent[r.key]) }),
+          h('td', { class: 'num', text: yoy.prior[r.key] == null ? '–' : r.show(yoy.prior[r.key]) }),
+          h('td', { class: 'num' }, changeEl(yoy.recent[r.key], yoy.prior[r.key], r)),
+        ))))
+    : h('p', { class: 'muted', text: 'Your history does not reach back a full year yet.' });
+  const yearNote = (y) => {
+    const startsLate = !y.first.endsWith('-01-01');
+    const endsEarly = !y.last.endsWith('-12-31');
+    if (startsLate && endsEarly) return `${fmtDate(y.first, { month: 'short', day: 'numeric' })} – ${fmtDate(y.last, { month: 'short', day: 'numeric' })}`;
+    if (startsLate) return `from ${fmtDate(y.first, { month: 'short', day: 'numeric' })}`;
+    if (endsEarly) return `to ${fmtDate(y.last, { month: 'short', day: 'numeric' })}`;
+    return 'full year';
+  };
+  const yearsTable = h('table', {},
+    h('thead', {}, h('tr', {},
+      h('th', { scope: 'col', text: 'Metric' }),
+      yoy.years.map((y) => h('th', { scope: 'col', class: 'num' }, y.year, h('span', { class: 'th-note', text: yearNote(y) }))),
+    )),
+    h('tbody', {}, YOY_ROWS.map((r) => h('tr', {},
+      h('td', { text: r.label }),
+      yoy.years.map((y) => h('td', { class: 'num', text: y[r.key] == null ? '–' : r.show(y[r.key]) })),
+    ))));
+  card.append(h('div', { class: 'yoy-grid' },
+    h('div', {}, h('h4', { text: 'Last 30 days versus a year earlier' }), h('div', { class: 'table-wrap' }, recentTable)),
+    h('div', {}, h('h4', { text: 'Yearly averages' }), h('div', { class: 'table-wrap' }, yearsTable)),
+  ));
+  return card;
+}
+
+function insightsSection({ days, rows, unit, insights }) {
+  if (!insights) {
+    return {
+      id: 'insights',
+      title: 'Insights',
+      tiles: [],
+      charts: [],
+      extra: [h('article', { class: 'card wide' }, h('p', { class: 'muted', text: 'Insights need your full history, which could not be loaded. Try Refresh.' }))],
+    };
+  }
+  const cur = insights.current || {};
+  const dateCol = { label: unit === 'day' ? 'Date' : unit === 'week' ? 'Week of' : 'Month', value: (d) => periodLabel(d, true) };
+  const timing = sleepTiming(days);
+  const flagged = (lvl) => days.filter((d) => d.ins?.illness === lvl).length;
+  const clockTicks = (() => {
+    const vals = rows.flatMap((d) => [d.ins?.bedMin, d.ins?.wakeMin]).filter((v) => v != null);
+    if (!vals.length) return undefined;
+    const step = Math.max(...vals) - Math.min(...vals) > 8 * 60 ? 120 : 60;
+    const lo = Math.floor(Math.min(...vals) / step) * step;
+    const hi = lo + step * Math.ceil((Math.max(...vals) - lo) / step);
+    const out = [];
+    for (let v = lo; v <= hi; v += step) out.push(v);
+    return out.length >= 2 ? out : undefined;
+  })();
+  const signalColor = (n) => (n >= 3 ? 'var(--critical)' : n === 2 ? 'var(--warning)' : 'var(--axis)');
+
+  return {
+    id: 'insights',
+    title: 'Insights',
+    tiles: [
+      {
+        kind: 'custom',
+        label: `HRV versus baseline${cur.hrv ? sinceLabel(cur.hrv.date) : ''}`,
+        unit: 'ms',
+        show: fmt.int,
+        emptyText: 'Needs about 10 weeks of HRV data',
+        compute: () => {
+          const x = cur.hrv;
+          if (!x) return {};
+          const pct = Math.round(((x.hrv7 - x.base) / x.base) * 100);
+          return {
+            value: x.hrv7,
+            sub: `7-day average · normal ${fmt.int(x.lo)}–${fmt.int(x.hi)} ms`,
+            status: x.status === 'below'
+              ? { key: 'warning', text: `${Math.abs(pct)}% below your baseline` }
+              : x.status === 'above'
+                ? { key: 'good', text: `${pct}% above your baseline` }
+                : { key: 'good', text: 'Within your normal range' },
+          };
+        },
+      },
+      {
+        kind: 'custom',
+        label: `Illness warning${cur.illness ? sinceLabel(cur.illness.date) : ''}`,
+        unit: '',
+        show: (v) => v,
+        emptyText: 'Needs about 2 weeks of data',
+        compute: () => {
+          const x = cur.illness;
+          if (!x) return {};
+          const lv = ILLNESS[x.level];
+          return {
+            value: lv.label,
+            sub: `${x.warningDays90} warning and ${x.watchDays90} watch days in the last 90 days`,
+            status: { key: lv.key, text: x.signals.length ? `Out of range: ${x.signals.map((s) => s.label.toLowerCase()).join(', ')}` : 'All signals in your normal range' },
+          };
+        },
+      },
+      {
+        kind: 'custom',
+        label: `Training load ratio${cur.load ? sinceLabel(cur.load.date) : ''}`,
+        unit: '',
+        show: (v) => nf2.format(v),
+        emptyText: 'Needs 4 weeks of recorded activities',
+        compute: () => {
+          const x = cur.load;
+          if (!x) return {};
+          return { value: x.acwr, sub: `7-day ${fmt.int(x.acute)} versus 28-day ${fmt.int(x.chronic)} load per day`, status: LOAD_STATUS[x.zone] };
+        },
+      },
+      {
+        kind: 'custom',
+        label: 'Average bedtime',
+        unit: '',
+        show: fmtClock,
+        emptyText: 'Not enough nights in this range',
+        compute: () => (timing ? { value: timing.bed, sub: `Varies ±${fmtMin(timing.bedSd)} night to night`, status: timing.bedSd <= 30 ? { key: 'good', text: 'Regular' } : timing.bedSd <= 60 ? { key: 'warning', text: 'Somewhat irregular' } : { key: 'critical', text: 'Irregular' } } : {}),
+      },
+      {
+        kind: 'custom',
+        label: 'Average wake time',
+        unit: '',
+        show: fmtClock,
+        emptyText: 'Not enough nights in this range',
+        compute: () => (timing ? { value: timing.wake, sub: `Varies ±${fmtMin(timing.wakeSd)} night to night`, status: timing.wakeSd <= 30 ? { key: 'good', text: 'Regular' } : timing.wakeSd <= 60 ? { key: 'warning', text: 'Somewhat irregular' } : { key: 'critical', text: 'Irregular' } } : {}),
+      },
+      {
+        kind: 'custom',
+        label: 'Weekend shift',
+        unit: '',
+        show: signedMin,
+        emptyText: 'Needs weekday and weekend nights',
+        compute: () => (timing?.weekendShift != null
+          ? {
+              value: timing.weekendShift,
+              sub: `Sleep midpoint on weekends versus weekdays`,
+              status: Math.abs(timing.weekendShift) <= 30 ? { key: 'good', text: 'Small shift' } : Math.abs(timing.weekendShift) <= 60 ? { key: 'warning', text: 'Moderate shift' } : { key: 'critical', text: 'Large shift' },
+            }
+          : {}),
+      },
+    ],
+    charts: [
+      {
+        id: 'hrvBase',
+        title: 'HRV versus baseline',
+        subtitle: `7-day average against your normal range: the previous 60 days' average ± half a standard deviation`,
+        legend: [{ color: 'var(--series-7)', label: '7-day HRV', shape: 'line' }, { color: 'var(--series-7)', label: 'Normal range', shape: 'band' }],
+        spec: {
+          type: 'line',
+          data: rows,
+          x: (d) => d.date,
+          series: [{ label: '7-day HRV', value: (d) => d.ins?.hrv7 ?? null, color: 'var(--series-7)' }],
+          band: { lo: (d) => d.ins?.hrvLo ?? null, hi: (d) => d.ins?.hrvHi ?? null, color: 'var(--series-7)' },
+          yFormat: (v) => fmt.int(v),
+          ariaLabel: 'HRV versus baseline line chart',
+          emptyText: 'Needs about 10 weeks of HRV data.',
+          tooltip: (d) => ({
+            title: periodLabel(d),
+            rows: d.ins?.hrv7 != null
+              ? [
+                  { color: 'var(--series-7)', value: `${fmt.int(d.ins.hrv7)} ms`, label: '7-day HRV' },
+                  { value: `${fmt.int(d.ins.hrvLo)}–${fmt.int(d.ins.hrvHi)} ms`, label: 'Normal range' },
+                ]
+              : [{ value: 'Not enough history', label: '' }],
+          }),
+        },
+        columns: [
+          dateCol,
+          { label: '7-day HRV', num: true, value: (d) => fmt.int(d.ins?.hrv7) },
+          { label: 'Normal low', num: true, value: (d) => fmt.int(d.ins?.hrvLo) },
+          { label: 'Normal high', num: true, value: (d) => fmt.int(d.ins?.hrvHi) },
+          { label: 'Status', value: (d) => d.ins?.hrvStatus || '–' },
+        ],
+      },
+      {
+        id: 'illness',
+        peak: true,
+        title: 'Illness warning signals',
+        subtitle: `Resting HR, HRV, respiratory rate and skin temp unusually far from your last 30 days · ${flagged('warning')} warning and ${flagged('watch')} watch days in this range`,
+        legend: [{ color: 'var(--axis)', label: '1 signal' }, { icon: 'warning', label: '2: watch' }, { icon: 'critical', label: '3–4: warning' }],
+        spec: {
+          type: 'bar',
+          data: rows,
+          x: (d) => d.date,
+          series: [{ label: 'Signals out of range', value: (d) => d.ins?.signalCount ?? null, color: 'var(--axis)' }],
+          colorFor: (d) => signalColor(d.ins?.signalCount ?? 0),
+          yTicks: [0, 1, 2, 3, 4],
+          ariaLabel: 'Illness warning signals bar chart',
+          tooltip: (d) => {
+            const sig = d.ins?.signals || [];
+            const n = d.ins?.signalCount;
+            const lvl = ILLNESS[d.ins?.illness || 'clear'];
+            return {
+              title: `${periodLabel(d)}${d.bucket ? ' · highest day' : ''}`,
+              rows: n == null
+                ? [{ value: 'Not enough history', label: '' }]
+                : [
+                    { icon: lvl.key, value: lvl.label, label: `${n} of 4 signals` },
+                    ...sig.map((s) => ({ value: `${fmt.auto(+s.value.toFixed(1))} ${s.unit}`, label: `${s.label}, usual ${fmt.auto(+s.baseline.toFixed(1))}` })),
+                  ],
+            };
+          },
+        },
+        columns: [
+          dateCol,
+          { label: 'Signals', num: true, value: (d) => fmt.int(d.ins?.signalCount) },
+          { label: 'Level', value: (d) => (d.ins?.illness ? ILLNESS[d.ins.illness].label : '–') },
+          { label: 'Out of range', value: (d) => (d.ins?.signals || []).map((s) => s.label).join(', ') || '–' },
+        ],
+      },
+      {
+        id: 'load',
+        title: 'Training load ratio',
+        subtitle: '7-day versus 28-day load from recorded activities. Load counts each minute in heart-rate zone N as N',
+        legend: [{ color: 'var(--series-1)', label: 'Ratio', shape: 'line' }, { color: 'var(--good)', label: '0.8–1.3', shape: 'band' }],
+        spec: {
+          type: 'line',
+          data: rows,
+          x: (d) => d.date,
+          series: [{ label: 'Load ratio', value: (d) => d.ins?.acwr ?? null, color: 'var(--series-1)' }],
+          band: { lo: () => 0.8, hi: () => 1.3, color: 'var(--good)' },
+          yFloor: 0,
+          yFormat: (v) => nf2.format(v),
+          ariaLabel: 'Training load ratio line chart',
+          emptyText: 'Needs 4 weeks of recorded activities.',
+          tooltip: (d) => ({
+            title: periodLabel(d),
+            rows: d.ins?.acwr != null
+              ? [
+                  { color: 'var(--series-1)', value: nf2.format(d.ins.acwr), label: 'Load ratio' },
+                  { value: fmt.int(d.ins.acute), label: '7-day load per day' },
+                  { value: fmt.int(d.ins.chronic), label: '28-day load per day' },
+                ]
+              : [{ value: 'Not enough history', label: '' }],
+          }),
+        },
+        columns: [
+          dateCol,
+          { label: 'Ratio', num: true, value: (d) => (d.ins?.acwr == null ? '–' : nf2.format(d.ins.acwr)) },
+          { label: '7-day load', num: true, value: (d) => fmt.int(d.ins?.acute) },
+          { label: '28-day load', num: true, value: (d) => fmt.int(d.ins?.chronic) },
+          { label: 'Zone', value: (d) => d.ins?.loadZone || '–' },
+        ],
+      },
+      {
+        id: 'sleepTiming',
+        title: 'Bedtime and wake time',
+        subtitle: timing ? `Average ${fmtClock(timing.bed)} to ${fmtClock(timing.wake)} over ${timing.nights} nights` : 'Main sleep each night',
+        legend: [{ color: 'var(--series-1)', label: 'Bedtime', shape: 'line' }, { color: 'var(--series-2)', label: 'Wake time', shape: 'line' }],
+        spec: {
+          type: 'line',
+          data: rows,
+          x: (d) => d.date,
+          series: [
+            { label: 'Bedtime', value: (d) => d.ins?.bedMin ?? null, color: 'var(--series-1)' },
+            { label: 'Wake time', value: (d) => d.ins?.wakeMin ?? null, color: 'var(--series-2)' },
+          ],
+          yTicks: clockTicks,
+          yFormat: fmtClock,
+          ariaLabel: 'Bedtime and wake time line chart',
+          tooltip: (d) => ({
+            title: periodLabel(d),
+            rows: d.ins?.bedMin != null
+              ? [
+                  { color: 'var(--series-2)', value: fmtClock(d.ins.wakeMin), label: 'Wake time' },
+                  { color: 'var(--series-1)', value: fmtClock(d.ins.bedMin), label: 'Bedtime' },
+                ]
+              : [{ value: 'No sleep recorded', label: '' }],
+          }),
+        },
+        columns: [
+          dateCol,
+          { label: 'Bedtime', num: true, value: (d) => fmtClock(d.ins?.bedMin) },
+          { label: 'Wake time', num: true, value: (d) => fmtClock(d.ins?.wakeMin) },
+        ],
+      },
+    ],
+    extra: [yoyCard(insights.yoy)],
+  };
+}
+
+function sectionDefs(ctx) {
+  const { days, rows, unit, maxHr } = ctx;
+  const dateCol = { label: unit === 'day' ? 'Date' : unit === 'week' ? 'Week of' : 'Month', value: (d) => periodLabel(d, true) };
+  const per = unit === 'day' ? 'per day' : unit === 'week' ? 'per week' : 'per month';
+  const avgOf = (f) => mean(days.map(f));
+  const zoneCounts = { good: 0, warning: 0, critical: 0 };
+  for (const d of days) {
+    const z = zoneOf(d.recovery?.score);
+    if (z) zoneCounts[z.key] += 1;
+  }
+  const strainVals = days.filter((d) => !d.inProgress).map((d) => d.strain).filter((v) => v != null);
+  const recAvg = avgOf((d) => d.recovery?.score);
+  const pct = (v) => `${fmt.int(v)}%`;
+  const hoursFmt = (v) => `${fmt.auto(v)}h`;
+  const vo2ByDate = new Map(rows.map((d, i) => {
+    const win = unit === 'day' ? rows.slice(Math.max(0, i - 6), i + 1) : [d];
+    return [d.date, vo2(maxHr, mean(win.map((x) => x.recovery?.rhr)))];
+  }));
+
+  return [
+    insightsSection(ctx),
+    {
+      id: 'recovery',
+      title: 'Recovery and health monitor',
+      tiles: [
+        { label: 'HRV', unit: 'ms', get: (d) => d.recovery?.hrv, show: fmt.int, diff: num1, better: 'up' },
+        { label: 'Resting heart rate', unit: 'bpm', get: (d) => d.recovery?.rhr, show: fmt.int, diff: num1, better: 'down' },
+        { label: 'Respiratory rate', unit: 'rpm', get: (d) => d.sleep?.respiratoryRate, show: fmt.one, diff: num1, better: null },
+        { label: 'Blood oxygen', unit: '%', get: (d) => d.recovery?.spo2, show: fmt.one, diff: num1, better: null },
+        { label: 'Skin temperature', unit: '°C', get: (d) => d.recovery?.skinTemp, show: fmt.one, diff: (v) => `${fmt.one(Math.abs(v))} °C`, better: null },
+      ],
+      charts: [
+        {
+          id: 'recovery',
+          title: 'Recovery',
+          subtitle: recAvg == null ? null : `Average ${fmt.int(recAvg)}% · ${zoneCounts.good} green, ${zoneCounts.warning} yellow, ${zoneCounts.critical} red days`,
+          legend: [{ icon: 'good', label: 'Green 67–100' }, { icon: 'warning', label: 'Yellow 34–66' }, { icon: 'critical', label: 'Red 0–33' }],
+          spec: {
+            type: 'bar',
+            data: rows,
+            x: (d) => d.date,
+            series: [{ label: 'Recovery', value: (d) => d.recovery?.score ?? null, color: 'var(--good)' }],
+            colorFor: (d) => zoneOf(d.recovery?.score)?.color,
+            yTicks: [0, 33, 67, 100],
+            yFormat: pct,
+            ariaLabel: 'Recovery bar chart',
+            tooltip: (d) => {
+              const r = d.recovery;
+              const z = zoneOf(r?.score);
+              return {
+                title: periodLabel(d),
+                rows: r
+                  ? [
+                      { icon: z.key, value: pct(r.score), label: `${z.label} recovery` },
+                      { value: `${fmt.int(r.hrv)} ms`, label: 'HRV' },
+                      { value: `${fmt.int(r.rhr)} bpm`, label: 'Resting HR' },
+                    ]
+                  : [{ value: 'No score', label: '' }],
+              };
+            },
+          },
+          columns: [
+            dateCol,
+            { label: 'Recovery', num: true, value: (d) => (d.recovery ? pct(d.recovery.score) : '–') },
+            { label: 'Zone', value: (d) => zoneOf(d.recovery?.score)?.label || '–' },
+            { label: 'HRV (ms)', num: true, value: (d) => fmt.int(d.recovery?.hrv) },
+            { label: 'RHR (bpm)', num: true, value: (d) => fmt.int(d.recovery?.rhr) },
+          ],
+        },
+        lineCard({ id: 'hrv', title: 'Heart rate variability', subtitle: `RMSSD in milliseconds · average ${fmt.int(avgOf((d) => d.recovery?.hrv))} ms`, rows, value: (d) => d.recovery?.hrv ?? null, color: 'var(--series-7)', label: 'HRV', show: (v) => `${fmt.int(v)}`, yFloor: 0 }),
+        lineCard({ id: 'rhr', title: 'Resting heart rate', subtitle: `Beats per minute · average ${fmt.int(avgOf((d) => d.recovery?.rhr))} bpm`, rows, value: (d) => d.recovery?.rhr ?? null, color: 'var(--series-2)', label: 'Resting HR', show: (v) => `${fmt.int(v)}`, yFloor: 0 }),
+        lineCard({ id: 'resp', title: 'Respiratory rate', subtitle: `Breaths per minute during sleep · average ${fmt.one(avgOf((d) => d.sleep?.respiratoryRate))}`, rows, value: (d) => d.sleep?.respiratoryRate ?? null, color: 'var(--series-1)', label: 'Respiratory rate', show: (v) => fmt.auto(v), yFloor: 0 }),
+        lineCard({ id: 'spo2', title: 'Blood oxygen', subtitle: `SpO2 during sleep · average ${fmt.one(avgOf((d) => d.recovery?.spo2))}%`, rows, value: (d) => d.recovery?.spo2 ?? null, color: 'var(--series-3)', label: 'SpO2', show: (v) => `${fmt.auto(v)}%`, yFloor: 0 }),
+        lineCard({ id: 'skin', title: 'Skin temperature', subtitle: `°C during sleep · average ${fmt.one(avgOf((d) => d.recovery?.skinTemp))} °C`, rows, value: (d) => d.recovery?.skinTemp ?? null, color: 'var(--series-7)', label: 'Skin temp', show: (v) => `${fmt.auto(v)}°`, yFloor: 0 }),
+      ],
+    },
+    {
+      id: 'sleep',
+      title: 'Sleep',
+      tiles: [
+        { label: 'Hours of sleep', unit: '', get: (d) => asleepMs(d.sleep), show: fmt.dur, diff: minsDiff, better: 'up', sub: (d) => `of ${fmt.dur(d.sleep?.neededMs)} needed` },
+        { label: 'Sleep need', unit: '', get: (d) => d.sleep?.neededMs, show: fmt.dur, diff: minsDiff, better: null },
+        { label: 'Sleep debt', unit: '', get: (d) => d.sleep?.debtMs, show: fmt.dur, diff: minsDiff, better: 'down' },
+        { label: 'Restorative sleep', unit: '', get: (d) => restorativeMs(d.sleep), show: fmt.dur, diff: minsDiff, better: 'up', sub: (d) => `${fmt.int((restorativeMs(d.sleep) / asleepMs(d.sleep)) * 100)}% of sleep, deep and REM` },
+        { label: 'Sleep performance', unit: '%', get: (d) => d.sleep?.performance, show: fmt.int, diff: (v) => `${fmt.int(Math.abs(v))} pts`, better: 'up' },
+        { label: 'Sleep consistency', unit: '%', get: (d) => d.sleep?.consistency, show: fmt.int, diff: (v) => `${fmt.int(Math.abs(v))} pts`, better: 'up' },
+        { label: 'Sleep efficiency', unit: '%', get: (d) => d.sleep?.efficiency, show: fmt.int, diff: (v) => `${fmt.int(Math.abs(v))} pts`, better: 'up' },
+        { label: 'Time in bed', unit: '', get: (d) => d.sleep?.inBedMs, show: fmt.dur, diff: minsDiff, better: null },
+        { label: 'Disturbances', unit: '', get: (d) => d.sleep?.disturbances, show: fmt.int, diff: int0, better: 'down' },
+      ],
+      charts: [
+        {
+          id: 'sleep',
+          title: 'Sleep stages',
+          subtitle: `Hours per night · average ${fmt.dur(avgOf((d) => asleepMs(d.sleep)))} asleep`,
+          legend: [
+            { color: 'var(--series-1)', label: 'Deep' },
+            { color: 'var(--series-2)', label: 'REM' },
+            { color: 'var(--series-3)', label: 'Light' },
+            { color: 'var(--series-4)', label: 'Awake' },
+          ],
+          spec: {
+            type: 'stack',
+            data: rows,
+            x: (d) => d.date,
+            series: [
+              { label: 'Deep (SWS)', short: 'Deep', value: (d) => hrs(d.sleep?.swsMs), color: 'var(--series-1)' },
+              { label: 'REM', short: 'REM', value: (d) => hrs(d.sleep?.remMs), color: 'var(--series-2)' },
+              { label: 'Light', short: 'Light', value: (d) => hrs(d.sleep?.lightMs), color: 'var(--series-3)' },
+              { label: 'Awake', short: 'Awake', value: (d) => hrs(d.sleep?.awakeMs), color: 'var(--series-4)' },
+            ],
+            yFormat: hoursFmt,
+            ariaLabel: 'Sleep stages stacked bar chart',
+            tooltip: (d) => {
+              const s = d.sleep;
+              if (!s) return { title: periodLabel(d), rows: [{ value: 'No sleep recorded', label: '' }] };
+              return {
+                title: `${periodLabel(d)} · ${fmt.dur(asleepMs(s))} asleep`,
+                rows: [
+                  { color: 'var(--series-4)', value: fmt.dur(s.awakeMs), label: 'Awake' },
+                  { color: 'var(--series-3)', value: fmt.dur(s.lightMs), label: 'Light' },
+                  { color: 'var(--series-2)', value: fmt.dur(s.remMs), label: 'REM' },
+                  { color: 'var(--series-1)', value: fmt.dur(s.swsMs), label: 'Deep (SWS)' },
+                ],
+              };
+            },
+          },
+          columns: [
+            dateCol,
+            { label: 'Asleep', num: true, value: (d) => fmt.dur(asleepMs(d.sleep)) },
+            { label: 'Deep', num: true, value: (d) => fmt.dur(d.sleep?.swsMs) },
+            { label: 'REM', num: true, value: (d) => fmt.dur(d.sleep?.remMs) },
+            { label: 'Light', num: true, value: (d) => fmt.dur(d.sleep?.lightMs) },
+            { label: 'Awake', num: true, value: (d) => fmt.dur(d.sleep?.awakeMs) },
+          ],
+        },
+        {
+          id: 'sleepNeed',
+          title: 'Hours of sleep versus need',
+          subtitle: `Average ${fmt.dur(avgOf((d) => asleepMs(d.sleep)))} asleep, ${fmt.dur(avgOf((d) => d.sleep?.neededMs))} needed`,
+          legend: [{ color: 'var(--series-1)', label: 'Asleep', shape: 'line' }, { color: 'var(--series-2)', label: 'Needed', shape: 'line' }],
+          spec: {
+            type: 'line',
+            data: rows,
+            x: (d) => d.date,
+            series: [
+              { label: 'Asleep', value: (d) => hrs(asleepMs(d.sleep)), color: 'var(--series-1)' },
+              { label: 'Needed', value: (d) => hrs(d.sleep?.neededMs), color: 'var(--series-2)' },
+            ],
+            yFloor: 0,
+            yFormat: hoursFmt,
+            ariaLabel: 'Hours of sleep versus sleep need line chart',
+            tooltip: (d) => ({
+              title: periodLabel(d),
+              rows: d.sleep
+                ? [
+                    { color: 'var(--series-1)', value: fmt.dur(asleepMs(d.sleep)), label: 'Asleep' },
+                    { color: 'var(--series-2)', value: fmt.dur(d.sleep.neededMs), label: 'Needed' },
+                    { value: fmt.dur(d.sleep.debtMs), label: 'Of which sleep debt' },
+                  ]
+                : [{ value: 'No sleep recorded', label: '' }],
+            }),
+          },
+          columns: [
+            dateCol,
+            { label: 'Asleep', num: true, value: (d) => fmt.dur(asleepMs(d.sleep)) },
+            { label: 'Needed', num: true, value: (d) => fmt.dur(d.sleep?.neededMs) },
+            { label: 'Sleep debt', num: true, value: (d) => fmt.dur(d.sleep?.debtMs) },
+            { label: 'Time in bed', num: true, value: (d) => fmt.dur(d.sleep?.inBedMs) },
+          ],
+        },
+        lineCard({ id: 'sleepPerf', title: 'Sleep performance', subtitle: `Sleep you got versus sleep you needed · average ${fmt.int(avgOf((d) => d.sleep?.performance))}%`, rows, value: (d) => d.sleep?.performance ?? null, color: 'var(--series-3)', label: 'Performance', show: pct, yTicks: [0, 25, 50, 75, 100] }),
+        {
+          id: 'sleepQuality',
+          title: 'Sleep consistency and efficiency',
+          subtitle: `Average ${fmt.int(avgOf((d) => d.sleep?.consistency))}% consistency, ${fmt.int(avgOf((d) => d.sleep?.efficiency))}% efficiency`,
+          legend: [{ color: 'var(--series-1)', label: 'Consistency', shape: 'line' }, { color: 'var(--series-3)', label: 'Efficiency', shape: 'line' }],
+          spec: {
+            type: 'line',
+            data: rows,
+            x: (d) => d.date,
+            series: [
+              { label: 'Consistency', value: (d) => d.sleep?.consistency ?? null, color: 'var(--series-1)' },
+              { label: 'Efficiency', value: (d) => d.sleep?.efficiency ?? null, color: 'var(--series-3)' },
+            ],
+            yTicks: [0, 25, 50, 75, 100],
+            yFormat: pct,
+            ariaLabel: 'Sleep consistency and efficiency line chart',
+            tooltip: (d) => ({
+              title: periodLabel(d),
+              rows: d.sleep
+                ? [
+                    { color: 'var(--series-1)', value: pct(d.sleep.consistency), label: 'Consistency' },
+                    { color: 'var(--series-3)', value: pct(d.sleep.efficiency), label: 'Efficiency' },
+                  ]
+                : [{ value: 'No sleep recorded', label: '' }],
+            }),
+          },
+          columns: [
+            dateCol,
+            { label: 'Consistency', num: true, value: (d) => (d.sleep ? pct(d.sleep.consistency) : '–') },
+            { label: 'Efficiency', num: true, value: (d) => (d.sleep ? pct(d.sleep.efficiency) : '–') },
+            { label: 'Disturbances', num: true, value: (d) => fmt.int(d.sleep?.disturbances) },
+          ],
+        },
+      ],
+    },
+    {
+      id: 'strain',
+      title: 'Strain and activity',
+      tiles: [
+        { label: 'Day strain', unit: '', get: (d) => d.strain, show: fmt.one, diff: num1, better: null, partial: true },
+        { label: 'Calories', unit: 'kcal', get: (d) => kcal(d.kilojoule), show: fmt.int, diff: int0, better: null, partial: true },
+        { label: 'Steps', unit: '', get: (d) => d.steps, show: fmt.int, diff: int0, better: 'up', partial: true, emptyText: 'WHOOP reports steps from Sept 2024' },
+        { label: 'Average heart rate', unit: 'bpm', get: (d) => d.avgHr, show: fmt.int, diff: int0, better: null, partial: true },
+        { kind: 'week', label: 'Workouts', unit: '', get: (d) => d.act.workouts, show: fmt.int, diff: num1, better: 'up' },
+        { kind: 'week', label: 'HR zones 1–3', unit: '', get: (d) => minutes(d.act.zone13Ms), show: fmtMin, diff: (v) => fmtMin(Math.abs(v)), better: 'up' },
+        { kind: 'week', label: 'HR zones 4–5', unit: '', get: (d) => minutes(d.act.zone45Ms), show: fmtMin, diff: (v) => fmtMin(Math.abs(v)), better: 'up' },
+        { kind: 'week', label: 'Strength activity', unit: '', get: (d) => minutes(d.act.strengthMs), show: fmtMin, diff: (v) => fmtMin(Math.abs(v)), better: 'up' },
+      ],
+      charts: [
+        {
+          id: 'strain',
+          title: 'Day strain',
+          subtitle: strainVals.length ? `Average ${fmt.one(mean(strainVals))} · peak ${fmt.one(Math.max(...strainVals))} on a 0–21 scale` : null,
+          spec: {
+            type: 'bar',
+            data: rows,
+            x: (d) => d.date,
+            series: [{ label: 'Strain', value: (d) => d.strain, color: 'var(--series-1)' }],
+            yTicks: [0, 7, 14, 21],
+            trendSkip: (d) => d.inProgress,
+            ariaLabel: 'Day strain bar chart',
+            tooltip: (d) => ({
+              title: `${periodLabel(d)}${d.inProgress ? ' · in progress' : ''}`,
+              rows: [
+                { color: 'var(--series-1)', value: fmt.one(d.strain), label: 'Strain' },
+                { value: `${fmt.int(kcal(d.kilojoule))} kcal`, label: 'Calories' },
+                { value: `${fmt.int(d.avgHr)} / ${fmt.int(d.maxHr)} bpm`, label: 'Avg / max HR' },
+              ],
+            }),
+          },
+          columns: [
+            dateCol,
+            { label: 'Strain', num: true, value: (d) => fmt.one(d.strain) + (d.inProgress ? ' (so far)' : '') },
+            { label: 'Calories', num: true, value: (d) => fmt.int(kcal(d.kilojoule)) },
+            { label: 'Avg HR', num: true, value: (d) => fmt.int(d.avgHr) },
+            { label: 'Max HR', num: true, value: (d) => fmt.int(d.maxHr) },
+          ],
+        },
+        {
+          id: 'steps',
+          title: 'Steps',
+          subtitle: (() => {
+            const a = mean(days.map((d) => (d.inProgress ? null : d.steps)));
+            return a == null ? 'WHOOP reports steps from September 2024 onward' : `Average ${fmt.int(a)} a day`;
+          })(),
+          spec: {
+            type: 'bar',
+            data: rows,
+            x: (d) => d.date,
+            series: [{ label: 'Steps', value: (d) => d.steps ?? null, color: 'var(--series-7)' }],
+            yFormat: fmt.compact,
+            trendSkip: (d) => d.inProgress,
+            ariaLabel: 'Steps bar chart',
+            emptyText: 'No step data in this range. WHOOP reports steps from September 2024 onward.',
+            tooltip: (d) => ({ title: `${periodLabel(d)}${d.inProgress ? ' · in progress' : ''}`, rows: [{ color: 'var(--series-7)', value: fmt.int(d.steps), label: 'Steps' }] }),
+          },
+          columns: [dateCol, { label: 'Steps', num: true, value: (d) => fmt.int(d.steps) }],
+        },
+        {
+          id: 'zones',
+          totals: true,
+          title: 'Heart rate zone time',
+          subtitle: `Minutes ${per} during recorded activities`,
+          legend: [{ color: 'var(--series-1)', label: 'Zones 1–3' }, { color: 'var(--series-2)', label: 'Zones 4–5' }],
+          spec: {
+            type: 'stack',
+            data: rows,
+            x: (d) => d.date,
+            series: [
+              { label: 'Zones 1–3', short: 'Z1–3', value: (d) => minutes(d.act.zone13Ms), color: 'var(--series-1)' },
+              { label: 'Zones 4–5', short: 'Z4–5', value: (d) => minutes(d.act.zone45Ms), color: 'var(--series-2)' },
+            ],
+            yFormat: (v) => `${fmt.int(v)}m`,
+            ariaLabel: 'Heart rate zone minutes stacked bar chart',
+            emptyText: 'No recorded activities in this range.',
+            tooltip: (d) => ({
+              title: periodLabel(d),
+              rows: [
+                { color: 'var(--series-2)', value: fmtMin(minutes(d.act.zone45Ms)), label: 'Zones 4–5' },
+                { color: 'var(--series-1)', value: fmtMin(minutes(d.act.zone13Ms)), label: 'Zones 1–3' },
+                { value: fmt.int(d.act.workouts), label: 'Activities' },
+              ],
+            }),
+          },
+          columns: [
+            dateCol,
+            { label: 'Zones 1–3', num: true, value: (d) => fmtMin(minutes(d.act.zone13Ms)) },
+            { label: 'Zones 4–5', num: true, value: (d) => fmtMin(minutes(d.act.zone45Ms)) },
+            { label: 'Activities', num: true, value: (d) => fmt.int(d.act.workouts) },
+          ],
+        },
+        {
+          id: 'strength',
+          totals: true,
+          title: 'Strength activity time',
+          subtitle: `Minutes ${per} of weightlifting, powerlifting and functional fitness`,
+          spec: {
+            type: 'bar',
+            data: rows,
+            x: (d) => d.date,
+            series: [{ label: 'Strength', value: (d) => minutes(d.act.strengthMs), color: 'var(--series-2)' }],
+            yFormat: (v) => `${fmt.int(v)}m`,
+            ariaLabel: 'Strength activity minutes bar chart',
+            emptyText: 'No strength activities in this range.',
+            tooltip: (d) => ({ title: periodLabel(d), rows: [{ color: 'var(--series-2)', value: fmtMin(minutes(d.act.strengthMs)), label: 'Strength activity' }] }),
+          },
+          columns: [dateCol, { label: 'Strength activity', num: true, value: (d) => fmtMin(minutes(d.act.strengthMs)) }],
+        },
+      ],
+    },
+    {
+      id: 'fitness',
+      title: 'Fitness and Healthspan',
+      tiles: [
+        {
+          kind: 'custom',
+          label: 'VO2 max (estimate)',
+          unit: 'ml/kg/min',
+          show: fmt.one,
+          diff: num1,
+          better: 'up',
+          emptyText: maxHr ? 'Not enough resting heart rate data' : 'Needs max heart rate in your WHOOP profile',
+          compute: (ds) => {
+            const rhrs = ds.map((d) => d.recovery?.rhr).filter((v) => v != null);
+            if (!maxHr || rhrs.length < 3) return {};
+            return {
+              value: vo2(maxHr, mean(rhrs.slice(-30))),
+              avg: rhrs.length > 30 ? vo2(maxHr, mean(rhrs)) : null,
+              sub: 'Last 30 days, from resting and max heart rate',
+            };
+          },
+        },
+        { kind: 'custom', label: 'Max heart rate', unit: 'bpm', show: fmt.int, noDelta: true, compute: () => ({ value: maxHr, sub: 'From your WHOOP profile' }) },
+        { kind: 'custom', label: 'Resting heart rate', unit: 'bpm', show: fmt.int, diff: num1, better: 'down', compute: (ds) => {
+          const rhrs = ds.map((d) => d.recovery?.rhr).filter((v) => v != null);
+          return { value: mean(rhrs.slice(-30)), avg: rhrs.length > 30 ? mean(rhrs) : null, sub: 'Last 30 days average' };
+        } },
+      ],
+      charts: [
+        lineCard({ id: 'vo2', title: 'VO2 max (estimate)', subtitle: `ml/kg/min from 15.3 × max HR ÷ resting HR${unit === 'day' ? ', 7-day rolling' : ''}`, rows, value: (d) => vo2ByDate.get(d.date) ?? null, color: 'var(--series-1)', label: 'VO2 max estimate', show: (v) => fmt.one(v) }),
+      ],
+      extra: [healthspanCard({ days, maxHr }), appOnlyCard()],
+    },
+  ];
+}
+
+function renderSections(ctx) {
+  currentUnit = ctx.unit;
+  currentSpanDays = ctx.days.length;
+  const built = sectionDefs(ctx).map((sec) => {
+    const cards = sec.charts.map((c) => chartCard(c));
+    const el = h('section', { class: 'section', 'aria-labelledby': `sec-${sec.id}` },
+      h('h2', { class: 'section-title', id: `sec-${sec.id}`, text: sec.title }),
+      h('div', { class: 'tiles' }, sec.tiles.map((t) => tileEl(t, ctx.days))),
+      h('div', { class: 'grid' }, cards.map((c) => c.card), sec.extra || []),
+    );
+    return { el, cards };
+  });
+  $('sections').replaceChildren(...built.map((b) => b.el));
+  built.forEach((b) => b.cards.forEach((c) => c.apply()));
+}
+
+// ---------- workouts ----------
+const ZONES = ['Zone 0', 'Zone 1', 'Zone 2', 'Zone 3', 'Zone 4', 'Zone 5'];
+function renderWorkouts(workouts) {
+  const total = workouts.reduce((a, w) => a + (w.durationMs || 0), 0);
+  const avgStrain = mean(workouts.map((w) => w.strain));
+  $('workoutsSub').textContent = workouts.length
+    ? `${fmt.int(workouts.length)} workouts ${isAll() ? 'all time' : `in the last ${state.days} days`} · ${fmt.dur(total)} total · average strain ${fmt.one(avgStrain)}`
+    : `No workouts ${isAll() ? 'yet' : `in the last ${state.days} days`}`;
+  $('zoneLegend').replaceWith(Object.assign(legendEl(ZONES.map((z, i) => ({ color: `var(--zone-${i})`, label: z }))), { id: 'zoneLegend' }));
+  const wrap = $('workoutsTable');
+  wrap.replaceChildren();
+  if (!workouts.length) return;
+  const LIMIT = 10;
+  const rows = state.showAllWorkouts ? workouts : workouts.slice(0, LIMIT);
+  const cols = ['Date', 'Activity', 'Duration', 'Strain', 'Avg HR', 'Max HR', 'Calories', 'Distance', 'Heart rate zones'];
+  const numeric = new Set(['Duration', 'Strain', 'Avg HR', 'Max HR', 'Calories', 'Distance']);
+  const thead = h('thead', {}, h('tr', {}, cols.map((c) => h('th', { scope: 'col', class: numeric.has(c) ? 'num' : null, text: c }))));
+  const tbody = h('tbody', {}, rows.map((w) => {
+    const zoneText = w.zonesMs ? w.zonesMs.map((ms, i) => `Z${i} ${fmt.mins(ms)}`).join(' · ') : 'Not scored';
+    const bar = h('div', { class: 'zonebar', role: 'img', 'aria-label': zoneText, title: zoneText });
+    if (w.zonesMs) {
+      w.zonesMs.forEach((ms, i) => {
+        if (ms <= 0) return;
+        const seg = h('span');
+        seg.style.flexGrow = String(ms);
+        seg.style.setProperty('--key', `var(--zone-${i})`);
+        bar.append(seg);
+      });
+    }
+    return h('tr', {},
+      h('td', { text: fmt.wall(w.localStart) }),
+      h('td', { text: w.sport.replace(/[-_]+/g, ' ').replace(/^\S/, (c) => c.toUpperCase()) }),
+      h('td', { class: 'num', text: fmt.dur(w.durationMs) }),
+      h('td', { class: 'num', text: fmt.one(w.strain) }),
+      h('td', { class: 'num', text: fmt.int(w.avgHr) }),
+      h('td', { class: 'num', text: fmt.int(w.maxHr) }),
+      h('td', { class: 'num', text: fmt.int(kcal(w.kilojoule)) }),
+      h('td', { class: 'num', text: w.distanceMeter ? `${(w.distanceMeter / 1000).toFixed(2)} km` : '–' }),
+      h('td', {}, bar),
+    );
+  }));
+  wrap.append(h('table', {}, thead, tbody));
+  if (workouts.length > LIMIT) {
+    wrap.append(h('div', { class: 'more-row' }, h('button', {
+      type: 'button',
+      class: 'linkbtn',
+      text: state.showAllWorkouts ? 'Show fewer' : `Show all ${workouts.length} workouts`,
+      onclick: () => { state.showAllWorkouts = !state.showAllWorkouts; renderWorkouts(workouts); },
+    })));
+  }
+}
+
+// ---------- body ----------
+function renderBody(body) {
+  const wrap = $('bodyStats');
+  wrap.replaceChildren();
+  if (!body) {
+    wrap.append(h('p', { class: 'muted', text: 'No body measurements on file.' }));
+    return;
+  }
+  const items = [];
+  if (body.heightMeter) {
+    const inches = body.heightMeter / 0.0254;
+    items.push(['Height', `${Math.round(body.heightMeter * 100)}`, 'cm', `${Math.floor(inches / 12)}′${Math.round(inches % 12)}″`]);
+  }
+  if (body.weightKg) items.push(['Weight', fmt.one(body.weightKg), 'kg', `${fmt.one(body.weightKg * 2.20462)} lb`]);
+  if (body.maxHr) items.push(['Max heart rate', fmt.int(body.maxHr), 'bpm', 'Used for heart rate zones']);
+  for (const [label, value, unit, note] of items) {
+    wrap.append(h('div', { class: 'tile' },
+      h('span', { class: 'label', text: label }),
+      h('span', { class: 'value' }, value, h('span', { class: 'unit', text: unit })),
+      h('span', { class: 'delta', text: note }),
+    ));
+  }
+}
+
+// ---------- boot ----------
+async function boot() {
+  const params = new URLSearchParams(location.search);
+  const loginError = params.get('login_error');
+  const wantDemo = params.has('demo');
+  if (loginError || wantDemo) history.replaceState(null, '', '/');
+  try {
+    state.status = (await getJSON('/api/status')).body;
+  } catch {
+    state.status = null;
+  }
+  if (!state.status) {
+    showView('connect');
+    showError('Cannot reach the local server. Is it running?');
+    return;
+  }
+  if (wantDemo) {
+    state.demo = true;
+    return openDashboard();
+  }
+  if (state.status.connected) return openDashboard();
+  renderConnect(loginError ? `WHOOP login failed: ${loginError}` : '');
+}
+
+window.addEventListener('focus', async () => {
+  if ($('connectView').hidden || $('setupNotice').hidden) return;
+  const { body } = await getJSON('/api/status').catch(() => ({ body: null }));
+  if (body) {
+    state.status = body;
+    if (body.redirectRegistered !== false) $('setupNotice').hidden = true;
+  }
+});
+
+boot();
