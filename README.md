@@ -22,15 +22,16 @@ switch to monthly averages. Tiles and subtitles always use daily values.
 ## What the dashboard shows
 
 The page follows the WHOOP app: today's **Recovery**, **Strain** and **Sleep**
-at the top, then five sections.
+at the top, then six sections.
 
 | Section | KPI tiles | Charts |
 |---|---|---|
-| Insights | HRV versus baseline, illness warning, training load ratio, average bedtime, average wake time, weekend shift | HRV versus baseline, illness warning signals, training load ratio, bedtime and wake time, year-over-year tables |
+| Health markers and habits | Chronotype, BMI, HRV stability, sleep regularity, step dose, workout time | HRV stability, sleep regularity, step dose, workout time of day |
+| Insights | HRV versus baseline, illness warning, training load ratio, average bedtime, average wake time, weekend shift | HRV versus baseline, illness warning signals, training load ratio, bedtime and wake time |
 | Recovery and health monitor | HRV, resting heart rate, respiratory rate, blood oxygen, skin temperature | Recovery, HRV, resting heart rate, respiratory rate, blood oxygen, skin temperature |
 | Sleep | Hours of sleep, sleep need, sleep debt, restorative sleep, performance, consistency, efficiency, time in bed, disturbances | Sleep stages, hours versus need, performance, consistency and efficiency |
 | Strain and activity | Day strain, calories, steps, average heart rate, and for the last 7 days: workouts, HR zones 1–3, HR zones 4–5, strength activity | Day strain, steps, heart rate zone time, strength activity time |
-| Fitness and Healthspan | VO2 max estimate, max heart rate, resting heart rate | VO2 max estimate, Healthspan inputs table, list of app-only metrics |
+| Fitness and Healthspan | VO2 max estimate, max heart rate, resting heart rate | VO2 max estimate, Healthspan inputs table |
 
 - **Comparisons:** each tile compares the latest value with the average for the
   selected range. Tiles marked "last 7 days" compare with the weekly average.
@@ -38,6 +39,12 @@ at the top, then five sections.
   the chart title is per week for ranges up to a month, per month up to a year,
   and per year beyond that. Today's unfinished strain and steps are left out of
   the trend.
+- **Trend colors:** a trend in the healthy direction is green, an unhealthy one
+  is red with a warning icon, and the dashed trendline takes the same color.
+  Metrics without a clear healthy direction (strain, skin temperature,
+  respiratory rate, sleep timing) stay grey. A change smaller than 2% of the
+  metric's level over the shown period counts as flat. The training load trend
+  is green while it stays inside 0.8–1.3.
 - **VO2 max** is an estimate: 15.3 × max heart rate ÷ resting heart rate. WHOOP's
   own value uses a different method and is not in the API.
 - **Healthspan inputs** are the nine metrics WHOOP uses for WHOOP Age. Eight can be
@@ -69,8 +76,27 @@ right even on the 7-day view. `lib/insights.js` holds the calculations.
   night in the selected range. Regularity is the standard deviation night to night.
   The weekend shift compares the sleep midpoint of nights before Saturday and
   Sunday with the other nights.
-- **Year over year:** the last 30 days against the same 30 days a year earlier,
-  plus averages for each calendar year.
+- **Chronotype:** mid-sleep on free days (nights before Saturday and Sunday) over
+  the last 8 weeks, corrected for catch-up sleep (MSFsc from the Munich ChronoType
+  Questionnaire). Rough groups: early before 4:00, intermediate 4:00–4:59, late
+  from 5:00. It is not valid if you use an alarm on weekends.
+- **BMI:** weight divided by height squared, from your WHOOP profile, with the WHO
+  categories. It doesn't account for muscle mass.
+- **HRV stability:** the 7-day coefficient of variation of ln(HRV), compared with
+  your previous 60 days (average ± 1 standard deviation). Higher means less stable,
+  which studies link with fatigue (Flatt 2017).
+- **Sleep regularity:** the Sleep Regularity Index (Phillips 2017) over the
+  previous 14 days: how often you are in the same sleep or wake state 24 hours
+  apart, from -100 to 100. UK Biobank reference: median 81, bottom fifth below
+  71.6, top fifth above 87.3. It uses each night's main sleep, and only compares
+  days the strap was worn. WHOOP doesn't share wake bouts, so it reads a little high.
+- **Step dose:** the 7-day average steps and the share of the last 30 days at
+  7,000 or more. Benefits level off around 8,000–10,000 a day under age 60
+  (Paluch 2022).
+- **Workout time:** workouts by local start hour: morning 5 AM–12 PM, afternoon
+  12–5 PM, evening 5–9 PM, night 9 PM–5 AM. It also counts hard workouts (strain
+  10 or more) that ended within 4 hours of your next sleep, which a study of WHOOP
+  members linked to later, shorter sleep and lower HRV (Leota 2025).
 
 Not available through the API, so not shown: WHOOP Age and Pace of Aging,
 WHOOP's VO2 max value, Stress Monitor, strain target, Strength Trainer muscular

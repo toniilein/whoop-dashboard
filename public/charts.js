@@ -323,7 +323,7 @@ function draw(host, force = false) {
     for (const t of trendLines(spec)) {
       const d = `M${cx(t.first).toFixed(1)},${clampY(t.intercept + t.slope * t.first).toFixed(1)}L${cx(t.last).toFixed(1)},${clampY(t.intercept + t.slope * t.last).toFixed(1)}`;
       svgEl('path', { d, class: 'trend-halo' }, tg);
-      svgEl('path', { d, class: 'trend' }, tg).style.setProperty('stroke', t.color);
+      svgEl('path', { d, class: 'trend' }, tg).style.setProperty('stroke', spec.trendColors?.[t.label] || t.color);
     }
   }
   const placed = [];
