@@ -1,195 +1,131 @@
 # WHOOP Dashboard
 
-A local dashboard for your WHOOP data. It talks to the official WHOOP Developer
-API (v2) and keeps your tokens on this computer.
+**Your WHOOP data, on your own computer.** A local dashboard with 70+ KPIs and
+research-backed health markers, a drag-and-drop cockpit, a full-history export,
+and an MCP server so Claude can answer questions about your data.
 
-No npm install needed. It runs on plain Node.js (20.12 or newer).
+![The dashboard with sample data: today's recovery, strain and sleep, and the health markers](docs/screenshots/dashboard-light.png)
 
-## Run it
+> Uses the official [WHOOP Developer API](https://developer.whoop.com). Not
+> affiliated with or endorsed by WHOOP. Your data and login stay on your machine.
 
-```bash
-npm start
-```
+## Features
 
-Then open http://localhost:3000.
+- **Everything the API offers, in one place.** Recovery, HRV, resting heart rate,
+  blood oxygen, skin temperature, respiratory rate, strain, steps, calories, sleep
+  stages, sleep need and debt, workouts and heart-rate zones, from 7 days to your
+  whole history.
+- **Insights the WHOOP app doesn't show.** HRV against your personal baseline, an
+  illness warning from four overnight signals, training load ratio, Sleep
+  Regularity Index, HRV stability, chronotype, step dose and a VO2 max estimate,
+  each with the research behind it. See [how the metrics work](docs/metrics.md).
+- **Trends that tell you if they're good news.** Every chart has a trendline. Healthy
+  trends turn green, unhealthy ones turn red with a warning.
+- **Your own cockpit.** Drag any of 72 KPIs into a grid, add section dividers and save
+  several layouts, for example a morning check-in and a training view.
+  [Read more](docs/cockpit.md).
+- **Ask Claude about your data.** A built-in [MCP server](docs/mcp.md) lets Claude
+  Desktop, Claude Code or any MCP client query your history: "how has my HRV changed
+  since the summer?" or "what happens to my recovery after hard days?".
+- **Export everything.** One command saves your full history as CSV and raw JSON.
+  [Read more](docs/export.md).
+- **Private by design.** Runs on `localhost`, stores your login with owner-only
+  permissions, and talks to nothing but WHOOP's own API. No accounts, no cloud, no
+  tracking.
+- **No build step.** Plain Node.js and hand-written SVG charts. The dashboard has no
+  dependencies; only the optional MCP server needs `npm install`.
+- **Light and dark, desktop and phone.** Follows your system theme and works at
+  phone width.
 
-Click **Preview with sample data** to look around before connecting an account.
+## Screenshots
 
-The range buttons show the last 7, 30 or 90 days, or **All time**. Over 120 days,
-charts switch to weekly averages so each bar stays readable. Over three years they
-switch to monthly averages. Tiles and subtitles always use daily values.
+All screenshots use the built-in sample data.
 
-## What the dashboard shows
-
-The page follows the WHOOP app: today's **Recovery**, **Strain** and **Sleep**
-at the top, then six sections.
-
-| Section | KPI tiles | Charts |
-|---|---|---|
-| Health markers and habits | Chronotype, BMI, HRV stability, sleep regularity, step dose, workout time | HRV stability, sleep regularity, step dose, workout time of day |
-| Insights | HRV versus baseline, illness warning, training load ratio, average bedtime, average wake time, weekend shift | HRV versus baseline, illness warning signals, training load ratio, bedtime and wake time |
-| Recovery and health monitor | HRV, resting heart rate, respiratory rate, blood oxygen, skin temperature | Recovery, HRV, resting heart rate, respiratory rate, blood oxygen, skin temperature |
-| Sleep | Hours of sleep, sleep need, sleep debt, restorative sleep, performance, consistency, efficiency, time in bed, disturbances | Sleep stages, hours versus need, performance, consistency and efficiency |
-| Strain and activity | Day strain, calories, steps, average heart rate, and for the last 7 days: workouts, HR zones 1–3, HR zones 4–5, strength activity | Day strain, steps, heart rate zone time, strength activity time |
-| Fitness and Healthspan | VO2 max estimate, max heart rate, resting heart rate | VO2 max estimate, Healthspan inputs table |
-
-- **Comparisons:** each tile compares the latest value with the average for the
-  selected range. Tiles marked "last 7 days" compare with the weekly average.
-- **Trendlines:** every chart has a dashed least-squares trendline. The rate under
-  the chart title is per week for ranges up to a month, per month up to a year,
-  and per year beyond that. Today's unfinished strain and steps are left out of
-  the trend.
-- **Trend colors:** a trend in the healthy direction is green, an unhealthy one
-  is red with a warning icon, and the dashed trendline takes the same color.
-  Metrics without a clear healthy direction (strain, skin temperature,
-  respiratory rate, sleep timing) stay grey. A change smaller than 2% of the
-  metric's level over the shown period counts as flat. The training load trend
-  is green while it stays inside 0.8–1.3.
-- **VO2 max** is an estimate: 15.3 × max heart rate ÷ resting heart rate. WHOOP's
-  own value uses a different method and is not in the API.
-- **Healthspan inputs** are the nine metrics WHOOP uses for WHOOP Age. Eight can be
-  derived from the API. Lean body mass and WHOOP Age itself cannot.
-- **Heart rate zone time** only covers recorded activities, because the API has no
-  all-day heart rate.
-- **Strength activity** counts weightlifting, powerlifting, functional fitness and
-  similar sports.
-
-### How the insights are calculated
-
-They always use your full history, whatever range you pick, so the baselines are
-right even on the 7-day view. `lib/insights.js` holds the calculations.
-
-- **HRV versus baseline:** your 7-day average HRV against a normal range. The
-  range is the average of the 60 days before that week, plus or minus half a
-  standard deviation.
-- **Illness warning:** each night, resting heart rate, HRV, respiratory rate and
-  skin temperature are compared with your previous 30 days. A signal counts as
-  out of range when it is 1.5 standard deviations or more in the unhealthy
-  direction. Two signals mean "watch" and three or four mean "warning". This is
-  a heads-up, not a diagnosis.
-- **Training load ratio:** the 7-day average training load divided by the 28-day
-  average. Load is zone-weighted minutes from recorded activities (Edwards TRIMP):
-  a minute in heart-rate zone 3 counts as 3. WHOOP strain is not used because it
-  is logarithmic, which squeezes the ratio towards 1. The common guideline is
-  0.8 to 1.3, and above 1.5 means a sharp jump in load.
-- **Bedtime, wake time and weekend shift:** these use the main sleep of each
-  night in the selected range. Regularity is the standard deviation night to night.
-  The weekend shift compares the sleep midpoint of nights before Saturday and
-  Sunday with the other nights.
-- **Chronotype:** mid-sleep on free days (nights before Saturday and Sunday) over
-  the last 8 weeks, corrected for catch-up sleep (MSFsc from the Munich ChronoType
-  Questionnaire). Rough groups: early before 4:00, intermediate 4:00–4:59, late
-  from 5:00. It is not valid if you use an alarm on weekends.
-- **BMI:** weight divided by height squared, from your WHOOP profile, with the WHO
-  categories. It doesn't account for muscle mass.
-- **HRV stability:** the 7-day coefficient of variation of ln(HRV), compared with
-  your previous 60 days (average ± 1 standard deviation). Higher means less stable,
-  which studies link with fatigue (Flatt 2017).
-- **Sleep regularity:** the Sleep Regularity Index (Phillips 2017) over the
-  previous 14 days: how often you are in the same sleep or wake state 24 hours
-  apart, from -100 to 100. UK Biobank reference: median 81, bottom fifth below
-  71.6, top fifth above 87.3. It uses each night's main sleep, and only compares
-  days the strap was worn. WHOOP doesn't share wake bouts, so it reads a little high.
-- **Step dose:** the 7-day average steps and the share of the last 30 days at
-  7,000 or more. Benefits level off around 8,000–10,000 a day under age 60
-  (Paluch 2022).
-- **Workout time:** workouts by local start hour: morning 5 AM–12 PM, afternoon
-  12–5 PM, evening 5–9 PM, night 9 PM–5 AM. It also counts hard workouts (strain
-  10 or more) that ended within 4 hours of your next sleep, which a study of WHOOP
-  members linked to later, shorter sleep and lower HRV (Leota 2025).
-
-Not available through the API, so not shown: WHOOP Age and Pace of Aging,
-WHOOP's VO2 max value, Stress Monitor, strain target, Strength Trainer muscular
-load, journal and behaviors, lean body mass, blood pressure and ECG.
-
-## Redirect URL
-
-WHOOP only sends the login back to URLs registered for your app. This app has
-`http://localhost:3000/` registered, and `.env` uses the same value. The two must
-match exactly, including the trailing slash. The server handles the login
-callback on the page itself.
-
-If you change the registered URL, update `WHOOP_REDIRECT_URI` in `.env` and restart.
-The connect screen warns you when WHOOP does not accept the configured URL.
-
-To log in without a localhost URL, register `https://whoop.com`, set
-`WHOOP_REDIRECT_URI=https://whoop.com` and restart. After approving access you
-land on whoop.com. Paste that tab's full address into the dashboard to finish.
-
-## Export all your data
-
-Log in through the dashboard first, then run:
-
-```bash
-npm run export
-```
-
-This pulls your whole WHOOP history, not just the last 90 days, into
-`exports/whoop-export-<date>_<time>/`:
-
-| File | Contents |
+| Insights | Health monitor |
 |---|---|
-| `daily.csv` | One row per day: recovery, HRV, resting HR, SpO2, skin temp, strain, calories, sleep stages, sleep scores, workouts |
-| `csv/*.csv` | Every field of every cycle, recovery, sleep and workout record, flattened |
-| `raw/*.json` | The untouched API responses, including profile and body measurements |
-| `summary.json` | Record counts, date range, averages, personal bests and workouts by sport |
+| ![Insights: HRV versus baseline, illness warning, training load and sleep timing](docs/screenshots/insights.png) | ![Recovery and health monitor charts with trendlines](docs/screenshots/health-monitor.png) |
+| **Cockpit** | **Building a cockpit** |
+| ![A saved cockpit with sections for today, warning signs and trends](docs/screenshots/cockpit.png) | ![Edit mode: the KPI list on the left, cards with move and resize controls](docs/screenshots/cockpit-edit.png) |
+| **Dark theme** | **Sleep** |
+| ![The dashboard in dark mode](docs/screenshots/dashboard-dark.png) | ![Sleep stages, hours versus need, performance and consistency](docs/screenshots/sleep.png) |
 
-The export paces itself to about 85 requests a minute and retries when WHOOP
-throttles it. About 2.7 years of history took two minutes.
+<p align="center"><img src="docs/screenshots/mobile.png" alt="The dashboard at phone width" width="260"></p>
 
-To regenerate the CSVs and summary from a previous export without calling WHOOP:
+## Quick start
 
-```bash
-npm run export -- --rebuild exports/whoop-export-<date>_<time>
-```
+You need [Node.js](https://nodejs.org) 20.12 or newer and a WHOOP membership.
 
-Some activities, such as sauna sessions, are marked scored but carry no score.
-Their strain and heart-rate columns are empty. Step counts start in September 2024.
+1. **Create a free WHOOP developer app** at the
+   [WHOOP Developer Dashboard](https://developer-dashboard.whoop.com). Add
+   `http://localhost:3000/` as its redirect URL and enable all six `read:` scopes.
+   The [setup guide](docs/setup.md) walks through every field.
+2. **Get the code and add your app's credentials:**
 
-`exports/` is gitignored because it holds personal health data.
+   ```bash
+   git clone https://github.com/toniilein/whoop-dashboard.git
+   cd whoop-dashboard
+   cp .env.example .env
+   ```
 
-The WHOOP API does not offer continuous heart rate, journal entries, stress
-monitor data or Healthspan, so those are not in the export.
+   Then put your client ID and client secret into `.env`.
+3. **Start the dashboard.** There's nothing to install for it:
 
-## About the "sandbox"
+   ```bash
+   npm start
+   ```
 
-WHOOP has no separate sandbox server or fake accounts. New apps start on the
-**Sandbox tier**, which uses the real API but allows at most 10 WHOOP members to
-connect. You log in with a real WHOOP account and see real data.
+4. **Open http://localhost:3000** and click **Connect WHOOP**. Or click
+   **Preview with sample data** to look around first.
 
-## Configuration (`.env`)
+Everyone uses their own developer app, so no one else's credentials or data are
+involved. New WHOOP apps start on the "Sandbox" tier, which allows up to 10 members:
+plenty for you and a few friends.
 
-| Variable | Meaning |
+## Documentation
+
+| Guide | What's in it |
 |---|---|
-| `WHOOP_CLIENT_ID` | Your app's client ID |
-| `WHOOP_CLIENT_SECRET` | Your app's client secret (server side only) |
-| `WHOOP_REDIRECT_URI` | Must match a registered redirect URL exactly, here `http://localhost:3000/` |
-| `PORT` | Local port, default 3000 |
+| [Setup](docs/setup.md) | Creating the WHOOP app, configuration, troubleshooting |
+| [Metrics](docs/metrics.md) | Every KPI and insight, how it's calculated, and the research behind it |
+| [Cockpit](docs/cockpit.md) | Building your own dashboards with drag and drop |
+| [MCP server](docs/mcp.md) | Connecting Claude Desktop, Claude Code or other MCP clients |
+| [Export](docs/export.md) | Saving your full history as CSV and JSON |
+| [Contributing](CONTRIBUTING.md) | Project structure, development, screenshots |
 
 ## How it works
 
-- `server.js` serves the page and handles login, logout and the data API.
-- `lib/whoop.js` handles OAuth. It requests the `offline` scope so it gets a refresh
-  token, and refreshes the access token automatically. Only one refresh runs at a
-  time, because WHOOP invalidates the old refresh token on every refresh.
-- `lib/dashboard.js` pages through cycles, recovery, sleep and workouts for the
-  chosen range. It attaches each night's recovery and sleep to its day.
-- `lib/demo.js` generates the sample data.
-- `lib/export.js` and `export.js` run the full-history export.
-- `lib/history.js` caches your full history in `data/history.json` for the All time
-  view. The first load seeds it from your newest export, or downloads everything if
-  there is none. After that it re-fetches only the last week, at most once a minute,
-  or when you click **Refresh**.
-- `public/` holds the page, styles and the dependency-free SVG charts.
+A small Node.js server on your computer fetches your data from the WHOOP API,
+caches your full history and computes the insights. The browser dashboard, the
+export and the MCP server all share that core. Apart from the answers you choose to
+share with Claude through the MCP server, your data stays on your machine.
 
-Data is cached for 60 seconds per range. **Refresh** bypasses the cache. WHOOP
-allows 100 requests a minute, and a 90-day load uses about 20.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.png">
+  <img alt="Architecture: the browser, a terminal and Claude call server.js, export.js and mcp.js on your computer. All three use the shared core in lib/, which stores data locally and calls the WHOOP Developer API over HTTPS." src="docs/architecture-light.png">
+</picture>
+
+The diagram is an [Excalidraw](https://excalidraw.com) file, so you can open and
+edit [docs/architecture.excalidraw](docs/architecture.excalidraw) there.
 
 ## Privacy and security
 
-- The server listens on 127.0.0.1 only and rejects requests for any other host name.
-- Tokens are stored in `data/tokens.json` with owner-only permissions.
-- `.env` and `data/` are gitignored.
-- **Log out** deletes the stored tokens and the cached history. Files in `exports/` stay. To revoke the app's access completely,
-  remove it in the WHOOP app's settings.
-- Anyone using this computer can open the dashboard while you are logged in.
+- The server listens on `127.0.0.1` only and rejects requests addressed to any other
+  host name.
+- Your WHOOP login is stored in `data/tokens.json` with owner-only file permissions.
+  Your client secret stays in `.env` and is never sent to the browser.
+- `.env`, `data/` and `exports/` are gitignored, so personal data can't be committed by
+  accident.
+- **Log out** deletes the stored login and cached history. To revoke access entirely,
+  remove the app in the WHOOP app's settings.
+- Anyone using your computer can open the dashboard while you're logged in.
+
+## Not medical advice
+
+This is a personal data tool, not a medical device. Insights such as the illness
+warning are heads-ups based on your own trends, not diagnoses. Talk to a doctor about
+anything health-related.
+
+## License
+
+[MIT](LICENSE). WHOOP is a trademark of WHOOP, Inc. This project is independent and
+not affiliated with WHOOP.
