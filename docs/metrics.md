@@ -34,6 +34,18 @@ Like the WHOOP app, the page opens with today's **Recovery**, **Strain** and
   sleep timing. A change smaller than 2% of the metric's level over the shown period
   counts as flat. The training load trend is green while the ratio stays inside
   0.8–1.3.
+- **Calendar heatmaps:** four charts show the last 12 months as one square per day,
+  a column per week, Monday at the top. They always cover a full year, whatever
+  range you pick. Hover a square, or use the arrow keys, to see the day's value.
+  **Show table** lists the days per category for each month. On narrow screens they
+  show fewer weeks rather than tiny squares.
+
+  | Heatmap | Colors |
+  |---|---|
+  | Recovery, every day | WHOOP's zones: red 0–33, yellow 34–66, green 67–100 |
+  | Sleep, every night | Sleep performance: poor under 70%, sufficient 70–84%, optimal 85% and up |
+  | Illness warning, every day | Grey when clear, yellow for watch (2 signals), red for warning (3–4) |
+  | Strain, every day | One blue scale: light 0–9.9, moderate 10–13.9, high 14–17.9, all out 18–21 |
 
 ![Recovery and health monitor charts with colored trendlines](screenshots/health-monitor.png)
 

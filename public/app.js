@@ -713,7 +713,7 @@ function tableEl(rows, columns) {
   return h('div', { class: 'table-wrap data-table' }, h('table', {}, thead, tbody));
 }
 
-function chartCard({ id, title, subtitle, legend, spec, columns, totals = false, peak = false, fixedAxis = false }) {
+function chartCard({ id, title, subtitle, legend, spec, columns, totals = false, peak = false, fixedAxis = false, wide = false }) {
   const period = currentUnit === 'week' ? 'week' : 'month';
   const note = currentUnit === 'day' || fixedAxis ? '' : peak ? ` · highest day each ${period}` : ` · ${period}ly ${totals ? 'totals' : 'averages'}`;
   if (currentUnit !== 'day' && !fixedAxis) spec.xFormat = fmtMonthYear;
@@ -728,7 +728,7 @@ function chartCard({ id, title, subtitle, legend, spec, columns, totals = false,
   const tableHost = h('div');
   const isTable = state.tableMode.has(id);
   const toggle = h('button', { type: 'button', class: 'linkbtn', 'aria-pressed': String(isTable), text: isTable ? 'Show chart' : 'Show table' });
-  const card = h('article', { class: 'card chart-card', 'aria-labelledby': `${id}-title` },
+  const card = h('article', { class: wide ? 'card chart-card wide' : 'card chart-card', 'aria-labelledby': `${id}-title` },
     h('header', { class: 'card-head' },
       h('div', {},
         h('h3', { id: `${id}-title`, text: title }),
@@ -745,7 +745,7 @@ function chartCard({ id, title, subtitle, legend, spec, columns, totals = false,
     toggle.textContent = tableOn ? 'Show chart' : 'Show table';
     toggle.setAttribute('aria-pressed', String(tableOn));
     host.hidden = tableOn;
-    tableHost.replaceChildren(tableOn ? tableEl(spec.data, columns) : '');
+    tableHost.replaceChildren(tableOn ? tableEl(spec.tableData || spec.data, columns) : '');
     if (!tableOn) renderChart(host, spec);
   };
   toggle.addEventListener('click', () => {
@@ -964,6 +964,7 @@ function insightsSection({ days, rows, unit, insights }) {
       },
     ],
     charts: [
+      ...(calendarDefs(insights).illness ? [calendarDefs(insights).illness] : []),
       {
         id: 'hrvBase',
         title: 'HRV versus baseline',
@@ -1524,8 +1525,135 @@ function energySection({ days, rows, unit, workouts }) {
   };
 }
 
+// ---------- calendar heatmaps: the last 12 months, one square per day ----------
+// The server sends a compact year of daily values with every range (insights.calendar).
+const CAL_DAY = 86_400_000;
+function calendarCard({ id, title, subtitle, cal, cats, classify, describe }) {
+  const byKey = new Map(cats.map((c) => [c.key, c]));
+  const catOf = (d) => byKey.get(classify(d)) || null;
+  const end = cal.at(-1)?.date || null;
+  const counts = new Map(cats.map((c) => [c.key, 0]));
+  for (const d of cal) {
+    const c = catOf(d);
+    if (c) counts.set(c.key, counts.get(c.key) + 1);
+  }
+  // the table view: days per category, per month
+  const byDate = new Map(cal.map((d) => [d.date, d]));
+  const months = new Map();
+  if (end) {
+    for (let t = Date.parse(`${cal[0].date}T00:00:00Z`); t <= Date.parse(`${end}T00:00:00Z`); t += CAL_DAY) {
+      const iso = new Date(t).toISOString().slice(0, 10);
+      const key = iso.slice(0, 7);
+      if (!months.has(key)) months.set(key, { date: `${key}-01`, none: 0, ...Object.fromEntries(cats.map((c) => [c.key, 0])) });
+      const row = months.get(key);
+      const d = byDate.get(iso);
+      const c = d ? catOf(d) : null;
+      if (c) row[c.key] += 1;
+      else row.none += 1;
+    }
+  }
+  const plural = (n) => `${fmt.int(n)} day${n === 1 ? '' : 's'}`;
+  return {
+    id,
+    title,
+    subtitle,
+    wide: true,
+    fixedAxis: true,
+    legend: cats.map((c) => ({ icon: c.icon, color: c.color, label: `${c.label} ${c.range} · ${plural(counts.get(c.key))}` })),
+    spec: {
+      type: 'calendar',
+      trend: false,
+      days: cal,
+      end,
+      weeks: 53,
+      category: catOf,
+      tableData: [...months.values()],
+      emptyText: 'No data in the last 12 months yet.',
+      ariaLabel: `${title}, last 12 months: ${cats.map((c) => `${plural(counts.get(c.key))} ${c.label.toLowerCase()}`).join(', ')}`,
+      tooltip: (d, cat, date) => ({
+        title: fmtDate(date, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }),
+        rows: cat ? describe(d, cat) : [{ value: 'No data', label: '' }],
+      }),
+    },
+    columns: [
+      { label: 'Month', value: (r) => fmtDate(r.date, { month: 'long', year: 'numeric' }) },
+      ...cats.map((c) => ({ label: c.label, num: true, value: (r) => fmt.int(r[c.key]) })),
+      { label: 'No data', num: true, value: (r) => fmt.int(r.none) },
+    ],
+  };
+}
+
+const STRAIN_STEPS = [
+  { key: 'light', label: 'Light', range: '0–9.9', min: 0, color: 'var(--zone-0)' },
+  { key: 'moderate', label: 'Moderate', range: '10–13.9', min: 10, color: 'var(--zone-2)' },
+  { key: 'high', label: 'High', range: '14–17.9', min: 14, color: 'var(--zone-4)' },
+  { key: 'allout', label: 'All out', range: '18–21', min: 18, color: 'var(--zone-5)' },
+];
+
+function calendarDefs(insights) {
+  const cal = insights?.calendar;
+  if (!cal?.length) return {};
+  const statusRow = (cat, value, label) => [{ icon: cat.icon, swatch: !cat.icon, color: cat.color, value, label }];
+  return {
+    recovery: calendarCard({
+      id: 'calRecovery',
+      title: 'Recovery, every day',
+      subtitle: 'The last 12 months, one square per day, in WHOOP’s recovery zones',
+      cal,
+      cats: [
+        { key: 'critical', label: 'Red', range: '0–33', icon: 'critical', color: 'var(--critical)' },
+        { key: 'warning', label: 'Yellow', range: '34–66', icon: 'warning', color: 'var(--warning)' },
+        { key: 'good', label: 'Green', range: '67–100', icon: 'good', color: 'var(--good)' },
+      ],
+      classify: (d) => zoneOf(d.recovery)?.key,
+      describe: (d, cat) => statusRow(cat, `${fmt.int(d.recovery)}%`, `${cat.label} recovery`),
+    }),
+    sleep: calendarCard({
+      id: 'calSleep',
+      title: 'Sleep, every night',
+      subtitle: 'The last 12 months, by sleep performance: the sleep you got versus the sleep you needed',
+      cal,
+      cats: [
+        { key: 'critical', label: 'Poor', range: 'under 70%', icon: 'critical', color: 'var(--critical)' },
+        { key: 'warning', label: 'Sufficient', range: '70–84%', icon: 'warning', color: 'var(--warning)' },
+        { key: 'good', label: 'Optimal', range: '85%+', icon: 'good', color: 'var(--good)' },
+      ],
+      classify: (d) => (d.sleep == null ? null : sleepZone(d.sleep).key),
+      describe: (d, cat) => statusRow(cat, `${fmt.int(d.sleep)}%`, `${cat.label} sleep performance`),
+    }),
+    illness: calendarCard({
+      id: 'calIllness',
+      title: 'Illness warning, every day',
+      subtitle: 'The last 12 months. Grey days had at most one overnight signal out of range',
+      cal,
+      cats: [
+        { key: 'clear', label: 'Clear', range: '0–1 signals', color: 'var(--cal-neutral)' },
+        { key: 'watch', label: 'Watch', range: '2 signals', icon: 'warning', color: 'var(--warning)' },
+        { key: 'warning', label: 'Warning', range: '3–4 signals', icon: 'critical', color: 'var(--critical)' },
+      ],
+      classify: (d) => d.illness,
+      describe: (d, cat) => {
+        const n = d.signals?.length || 0;
+        const rows = statusRow(cat, cat.label, `${n} of 4 signals out of range`);
+        if (n) rows.push({ value: '', label: d.signals.join(', ') });
+        return rows;
+      },
+    }),
+    strain: calendarCard({
+      id: 'calStrain',
+      title: 'Strain, every day',
+      subtitle: 'The last 12 months, by WHOOP strain level. Today counts the strain so far',
+      cal,
+      cats: STRAIN_STEPS,
+      classify: (d) => (d.strain == null ? null : [...STRAIN_STEPS].reverse().find((st) => d.strain >= st.min).key),
+      describe: (d, cat) => statusRow(cat, fmt.one(d.strain), `${cat.label} strain${d.partial ? ' so far' : ''}`),
+    }),
+  };
+}
+
 function sectionDefs(ctx) {
   const { days, rows, unit, maxHr } = ctx;
+  const cals = calendarDefs(ctx.insights);
   const dateCol = { label: unit === 'day' ? 'Date' : unit === 'week' ? 'Week of' : 'Month', value: (d) => periodLabel(d, true) };
   const per = unit === 'day' ? 'per day' : unit === 'week' ? 'per week' : 'per month';
   const avgOf = (f) => mean(days.map(f));
@@ -1557,6 +1685,7 @@ function sectionDefs(ctx) {
         { label: 'Skin temperature', unit: '°C', get: (d) => d.recovery?.skinTemp, show: fmt.one, diff: (v) => `${fmt.one(Math.abs(v))} °C`, better: null },
       ],
       charts: [
+        ...(cals.recovery ? [cals.recovery] : []),
         {
           id: 'recovery',
           title: 'Recovery',
@@ -1616,6 +1745,7 @@ function sectionDefs(ctx) {
         { label: 'Disturbances', unit: '', get: (d) => d.sleep?.disturbances, show: fmt.int, diff: int0, better: 'down' },
       ],
       charts: [
+        ...(cals.sleep ? [cals.sleep] : []),
         {
           id: 'sleep',
           title: 'Sleep stages',
@@ -1745,6 +1875,7 @@ function sectionDefs(ctx) {
         { kind: 'week', label: 'Strength activity', unit: '', get: (d) => minutes(d.act.strengthMs), show: fmtMin, diff: (v) => fmtMin(Math.abs(v)), better: 'up' },
       ],
       charts: [
+        ...(cals.strain ? [cals.strain] : []),
         {
           id: 'strain',
           title: 'Day strain',
@@ -1914,6 +2045,7 @@ const SUGGESTED = [
   ['tile:insights:training-load-ratio', 3], ['tile:markers:sleep-regularity', 3],
   { title: 'Trends' },
   ['chart:hrvBase', 6], ['chart:recovery', 6], ['chart:sleep', 6], ['chart:energy', 6],
+  ['chart:calRecovery', 12],
 ];
 // Dividers are layout-only: any number of them, each with its own id and editable title.
 const DIVIDER = { id: 'divider', name: 'Section divider', kind: 'divider' };
@@ -2040,7 +2172,7 @@ function buildCatalog(ctx) {
       items.push({ id: `tile:${sec.id}:${slug(base)}`, name: t.kind === 'week' ? `${base} (7 days)` : base, kind: 'tile', make: () => ({ el: tileEl(t, ctx.days) }) });
     }
     for (const c of sec.charts) {
-      items.push({ id: `chart:${c.id}`, name: c.title, kind: 'chart', make: () => { const cc = chartCard(c); return { el: cc.card, apply: cc.apply }; } });
+      items.push({ id: `chart:${c.id}`, name: c.title, kind: 'chart', size: c.wide ? 12 : undefined, make: () => { const cc = chartCard(c); return { el: cc.card, apply: cc.apply }; } });
     }
     for (const el of sec.extra || []) {
       const name = el.querySelector('h3')?.textContent;
@@ -2087,7 +2219,7 @@ function addWidget(item, index) {
     return;
   }
   if (state.cockpit.some((x) => x.id === item.id)) return;
-  updateCockpit((list) => list.splice(index ?? list.length, 0, { id: item.id, size: SIZES[item.kind][0] }), { id: item.id, act: 'name' });
+  updateCockpit((list) => list.splice(index ?? list.length, 0, { id: item.id, size: item.size || SIZES[item.kind][0] }), { id: item.id, act: 'name' });
 }
 function renameDivider(id, title) {
   const entry = state.cockpit.find((x) => x.id === id);

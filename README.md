@@ -21,7 +21,9 @@ and an MCP server so Claude can answer questions about your data.
   each with the research behind it. See [how the metrics work](docs/metrics.md).
 - **Trends that tell you if they're good news.** Every chart has a trendline. Healthy
   trends turn green, unhealthy ones turn red with a warning.
-- **Your own cockpit.** Drag any of 72 KPIs into a grid, add section dividers and save
+- **A year at a glance.** Calendar heatmaps show every day of the last 12 months for
+  recovery, sleep, strain and the illness warning, one square per day.
+- **Your own cockpit.** Drag any of 70+ KPIs into a grid, add section dividers and save
   several layouts, for example a morning check-in and a training view.
   [Read more](docs/cockpit.md).
 - **Ask Claude about your data.** A built-in [MCP server](docs/mcp.md) lets Claude
@@ -43,11 +45,11 @@ All screenshots use the built-in sample data.
 
 | Insights | Health monitor |
 |---|---|
-| ![Insights: HRV versus baseline, illness warning, training load and sleep timing](docs/screenshots/insights.png) | ![Recovery and health monitor charts with trendlines](docs/screenshots/health-monitor.png) |
+| ![Insights: HRV versus baseline, illness warning, training load and sleep timing](docs/screenshots/insights.png) | ![Recovery calendar heatmap for the last 12 months, and the health monitor charts with trendlines](docs/screenshots/health-monitor.png) |
 | **Cockpit** | **Building a cockpit** |
 | ![A saved cockpit with sections for today, warning signs and trends](docs/screenshots/cockpit.png) | ![Edit mode: the KPI list on the left, cards with move and resize controls](docs/screenshots/cockpit-edit.png) |
 | **Dark theme** | **Sleep** |
-| ![The dashboard in dark mode](docs/screenshots/dashboard-dark.png) | ![Sleep stages, hours versus need, performance and consistency](docs/screenshots/sleep.png) |
+| ![The dashboard in dark mode](docs/screenshots/dashboard-dark.png) | ![Sleep calendar heatmap, sleep stages, hours versus need, performance and consistency](docs/screenshots/sleep.png) |
 
 <p align="center"><img src="docs/screenshots/mobile.png" alt="The dashboard at phone width" width="260"></p>
 

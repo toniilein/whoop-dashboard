@@ -71,6 +71,30 @@ export function trendLines(spec) {
   }).filter(Boolean);
 }
 
+// Tooltip content: a title, then rows of key + value + label. A row's key is a status icon
+// (good / warning / critical), a color swatch, or a line key.
+function fillTip(tip, info) {
+  tip.replaceChildren();
+  const title = document.createElement('div');
+  title.className = 'tt-title';
+  title.textContent = info.title;
+  tip.appendChild(title);
+  for (const row of info.rows) {
+    const r = document.createElement('div');
+    r.className = 'tt-row';
+    const key = document.createElement('span');
+    key.className = row.icon ? `tt-icon status-icon status-${row.icon}` : row.swatch ? 'tt-swatch' : 'tt-key';
+    if (!row.icon && row.color) key.style.setProperty('--key', row.color);
+    const val = document.createElement('strong');
+    val.textContent = row.value;
+    const lab = document.createElement('span');
+    lab.className = 'tt-label';
+    lab.textContent = row.label || '';
+    r.append(key, val, lab);
+    tip.appendChild(r);
+  }
+}
+
 export function renderChart(host, spec) {
   const st = host.__chart || (host.__chart = {});
   st.spec = spec;
@@ -90,6 +114,7 @@ function draw(host, force = false) {
   const width = Math.max(240, Math.floor(host.clientWidth));
   if (!force && st.lastWidth === width) return;
   st.lastWidth = width;
+  if (spec.type === 'calendar') return drawCalendar(host, spec, width);
 
   const data = spec.data;
   const n = data.length;
@@ -372,26 +397,7 @@ function draw(host, force = false) {
         dot.setAttribute('visibility', 'visible');
       });
     }
-    const info = spec.tooltip(d, i);
-    tip.replaceChildren();
-    const title = document.createElement('div');
-    title.className = 'tt-title';
-    title.textContent = info.title;
-    tip.appendChild(title);
-    for (const row of info.rows) {
-      const r = document.createElement('div');
-      r.className = 'tt-row';
-      const key = document.createElement('span');
-      key.className = row.icon ? `tt-icon icon-${row.icon}` : 'tt-key';
-      if (row.color) key.style.setProperty('--key', row.color);
-      const val = document.createElement('strong');
-      val.textContent = row.value;
-      const lab = document.createElement('span');
-      lab.className = 'tt-label';
-      lab.textContent = row.label || '';
-      r.append(key, val, lab);
-      tip.appendChild(r);
-    }
+    fillTip(tip, spec.tooltip(d, i));
     tip.hidden = false;
     const tw = tip.offsetWidth;
     const th = tip.offsetHeight;
@@ -430,6 +436,155 @@ function draw(host, force = false) {
     } else if (e.key === 'Home' || e.key === 'End') {
       e.preventDefault();
       show(e.key === 'Home' ? 0 : n - 1);
+    } else if (e.key === 'Escape') {
+      hide();
+    }
+  });
+}
+
+// ---- calendar heatmap: one square per day, a column per week (Monday first), the most
+// recent week on the right. spec: { days: [{ date, ... }], end: 'YYYY-MM-DD', weeks,
+// category(day) -> { color, ... } | null, tooltip(day, category, date), ariaLabel }.
+// Narrow hosts show fewer weeks instead of shrinking the squares below MIN_CELL.
+const DAY_MS = 86_400_000;
+const MIN_CELL = 9;
+const MAX_CELL = 16;
+const CELL_GAP = 3;
+const isoOf = (t) => new Date(t).toISOString().slice(0, 10);
+
+function drawCalendar(host, spec, width) {
+  host.replaceChildren();
+  host.classList.add('chart-host', 'is-calendar');
+  const byDate = new Map(spec.days.map((d) => [d.date, d]));
+  if (!spec.end || !spec.days.some((d) => spec.category(d))) {
+    const empty = document.createElement('p');
+    empty.className = 'chart-empty';
+    empty.textContent = spec.emptyText || 'No data in the last 12 months yet.';
+    host.appendChild(empty);
+    return;
+  }
+
+  const left = 30;
+  const top = 18;
+  const wanted = spec.weeks || 53;
+  const avail = width - left - 4;
+  const weeks = Math.max(4, Math.min(wanted, Math.floor((avail + CELL_GAP) / (MIN_CELL + CELL_GAP))));
+  const cell = Math.max(MIN_CELL, Math.min(MAX_CELL, Math.floor((avail + CELL_GAP) / weeks - CELL_GAP)));
+  const pitch = cell + CELL_GAP;
+  const gridW = weeks * pitch - CELL_GAP;
+  const W = left + gridW + 4;
+  const H = top + 7 * pitch - CELL_GAP + 4;
+
+  const endT = Date.parse(`${spec.end}T00:00:00Z`);
+  const weekday = (t) => (new Date(t).getUTCDay() + 6) % 7; // Monday = 0
+  const startT = endT - weekday(endT) * DAY_MS - (weeks - 1) * 7 * DAY_MS;
+  const cells = [];
+  for (let t = startT, i = 0; t <= endT; t += DAY_MS, i++) {
+    const date = isoOf(t);
+    const d = byDate.get(date) || null;
+    cells.push({ date, t, col: Math.floor(i / 7), row: i % 7, d, cat: d ? spec.category(d) : null });
+  }
+
+  const svg = svgEl('svg', {
+    width: W,
+    height: H,
+    viewBox: `0 0 ${W} ${H}`,
+    role: 'img',
+    tabindex: '0',
+    'aria-label': `${spec.ariaLabel || 'Calendar'}. Use the arrow keys to move between days.`,
+    class: 'chart chart-calendar',
+  });
+
+  // month labels on the column that holds the 1st, never closer than 3 columns apart
+  const labels = svgEl('g', {}, svg);
+  let lastCol = -10;
+  for (const c of cells) {
+    const isFirst = c.date.endsWith('-01');
+    if (!isFirst && !(c.col === 0 && c.row === 0)) continue;
+    if (c.col - lastCol < 3) continue;
+    if (!isFirst && cells.some((o) => o.date.endsWith('-01') && o.col <= 2)) continue;
+    lastCol = c.col;
+    const name = new Date(c.t).toLocaleDateString(undefined, { month: 'short', timeZone: 'UTC' });
+    svgEl('text', { x: left + c.col * pitch, y: top - 6, class: 'tick' }, labels).textContent = name;
+  }
+  // weekday labels on Monday, Wednesday and Friday
+  for (const row of [0, 2, 4]) {
+    const name = new Date(Date.UTC(2024, 0, 1 + row)).toLocaleDateString(undefined, { weekday: 'short', timeZone: 'UTC' });
+    svgEl('text', { x: left - 6, y: top + row * pitch + cell / 2, dy: '0.32em', 'text-anchor': 'end', class: 'tick' }, labels).textContent = name;
+  }
+
+  const g = svgEl('g', {}, svg);
+  const radius = Math.min(3, cell / 4);
+  for (const c of cells) {
+    const r = svgEl('rect', {
+      x: left + c.col * pitch + (c.cat ? 0 : 0.5),
+      y: top + c.row * pitch + (c.cat ? 0 : 0.5),
+      width: c.cat ? cell : cell - 1,
+      height: c.cat ? cell : cell - 1,
+      rx: radius,
+      class: c.cat ? 'cal-cell' : 'cal-cell cal-empty',
+    }, g);
+    if (c.cat) r.style.setProperty('fill', c.cat.color);
+  }
+  const ring = svgEl('rect', { width: cell + 4, height: cell + 4, rx: radius + 1, class: 'cal-ring', visibility: 'hidden' }, svg);
+
+  const tip = document.createElement('div');
+  tip.className = 'tooltip';
+  tip.hidden = true;
+  host.append(svg, tip);
+  if (weeks < wanted) {
+    const note = document.createElement('p');
+    note.className = 'cal-note';
+    note.textContent = `Showing the last ${weeks} weeks. Show table has the full year.`;
+    host.appendChild(note);
+  }
+
+  let active = -1;
+  function show(i) {
+    active = i;
+    const c = cells[i];
+    const x = left + c.col * pitch;
+    const y = top + c.row * pitch;
+    ring.setAttribute('x', x - 2);
+    ring.setAttribute('y', y - 2);
+    ring.setAttribute('visibility', 'visible');
+    fillTip(tip, spec.tooltip(c.d, c.cat, c.date));
+    tip.hidden = false;
+    const tw = tip.offsetWidth;
+    const th = tip.offsetHeight;
+    let tl = x + cell + 10;
+    if (tl + tw > host.clientWidth - 4) tl = x - 10 - tw;
+    tl = Math.max(4, tl);
+    let tt = y + cell / 2 - th / 2;
+    tt = Math.max(0, Math.min(H - th, tt));
+    tip.style.left = `${tl}px`;
+    tip.style.top = `${tt}px`;
+  }
+  function hide() {
+    active = -1;
+    ring.setAttribute('visibility', 'hidden');
+    tip.hidden = true;
+  }
+  svg.addEventListener('pointermove', (e) => {
+    const r = svg.getBoundingClientRect();
+    const col = Math.floor((e.clientX - r.left - left + CELL_GAP / 2) / pitch);
+    const row = Math.floor((e.clientY - r.top - top + CELL_GAP / 2) / pitch);
+    const i = col * 7 + row;
+    if (col < 0 || row < 0 || row > 6 || i >= cells.length) return hide();
+    if (i !== active) show(i);
+  });
+  svg.addEventListener('pointerleave', hide);
+  svg.addEventListener('focus', () => show(active >= 0 ? active : cells.length - 1));
+  svg.addEventListener('blur', hide);
+  svg.addEventListener('keydown', (e) => {
+    const moves = { ArrowUp: -1, ArrowDown: 1, ArrowLeft: -7, ArrowRight: 7 };
+    if (e.key in moves) {
+      e.preventDefault();
+      const from = active < 0 ? cells.length - 1 : active;
+      show(Math.max(0, Math.min(cells.length - 1, from + moves[e.key])));
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      show(e.key === 'Home' ? 0 : cells.length - 1);
     } else if (e.key === 'Escape') {
       hide();
     }

@@ -21,7 +21,8 @@ The cockpit uses the same date range and theme as the dashboard.
 ## Building a layout
 
 The list on the left holds everything the dashboard can draw: the three overview
-cards, 42 tiles, 26 charts and the Healthspan table. Type in the search box to find
+cards, about 40 tiles, 30 charts including the calendar heatmaps, and the Healthspan
+table. Heatmaps start at full width. Type in the search box to find
 one quickly.
 
 - **Add a card** by dragging it into the grid, or with its **+** button in the list.

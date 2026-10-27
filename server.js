@@ -246,8 +246,8 @@ async function handle(req, res) {
 
   if (req.method === 'GET' && url.pathname === '/api/demo') {
     const days = parseDays(url);
-    const payload = demoPayload(days === 'all' ? 180 : days);
-    const full = demoPayload(180);
+    const payload = demoPayload(days === 'all' ? 400 : days);
+    const full = demoPayload(400);
     payload.insights = computeInsights(full.days, full.workouts, payload.days.map((d) => d.date), full.body?.maxHr);
     return send(res, 200, payload);
   }
