@@ -194,7 +194,11 @@ function draw(host, force = false) {
   for (let i = n - 1; i >= 0; i -= every) {
     const x = cx(i);
     if (x - 20 < m.left - 10) continue;
-    svgEl('text', { x, y: H - 8, 'text-anchor': 'middle', class: 'tick' }, xg).textContent = (spec.xFormat || fmtShortDate)(spec.x(data[i]));
+    const label = (spec.xFormat || fmtShortDate)(spec.x(data[i]));
+    // keep edge labels inside the chart (about 6.2px per character at 11-12px)
+    const half = (String(label).length * 6.2) / 2;
+    const attrs = x + half > width ? { x: width, 'text-anchor': 'end' } : x - half < 0 ? { x: 0, 'text-anchor': 'start' } : { x, 'text-anchor': 'middle' };
+    svgEl('text', { ...attrs, y: H - 8, class: 'tick' }, xg).textContent = label;
   }
 
   // ---- shaded band (a normal or target range), drawn behind the marks

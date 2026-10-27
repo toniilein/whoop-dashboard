@@ -15,19 +15,27 @@ const state = {
   showAllWorkouts: false,
   requestId: 0,
   pollTimer: null,
+  view: store.get('view') === 'cockpit' ? 'cockpit' : 'dashboard',
+  cockpit: [],
+  editing: false,
+  ctx: null,
 };
 
 // ---------- theme ----------
+// system (follows the OS), light or dark; anything else saved earlier falls back to system
+const THEMES = ['system', 'light', 'dark'];
 function applyTheme(t) {
   if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
   else delete document.documentElement.dataset.theme;
 }
-applyTheme(store.get('theme'));
-$('themeBtn').addEventListener('click', () => {
-  const current = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-  const next = current === 'dark' ? 'light' : 'dark';
-  applyTheme(next);
-  store.set('theme', next);
+const savedTheme = THEMES.includes(store.get('theme')) ? store.get('theme') : 'system';
+applyTheme(savedTheme);
+$('themeSelect').value = savedTheme;
+$('themeSelect').addEventListener('change', (e) => {
+  applyTheme(e.target.value);
+  store.set('theme', e.target.value);
+  // redraw so colors computed at draw time follow the theme
+  if (state.data && !$('dashView').hidden) render();
 });
 
 // ---------- formatting ----------
@@ -118,7 +126,7 @@ function aggregate(days) {
             };
           })()
         : null,
-      act: ['workouts', 'zone13Ms', 'zone45Ms', 'strengthMs'].reduce((o, k) => ((o[k] = ds.reduce((a, x) => a + (x.act?.[k] || 0), 0)), o), {}),
+      act: ['workouts', 'zone13Ms', 'zone45Ms', 'strengthMs', 'kcal', 'distanceKm', 'climbM'].reduce((o, k) => ((o[k] = ds.reduce((a, x) => a + (x.act?.[k] || 0), 0)), o), {}),
       recovery: ds.some((x) => x.recovery)
         ? {
             score: avg((x) => x.recovery?.score),
@@ -300,6 +308,20 @@ $('logoutBtn').addEventListener('click', async () => {
 $('refreshBtn').addEventListener('click', () => load({ fresh: true }));
 
 // ---------- range filter ----------
+function syncView() {
+  for (const b of $('viewControl').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.view === state.view));
+  $('classicView').hidden = state.view !== 'dashboard';
+  $('cockpitView').hidden = state.view !== 'cockpit';
+}
+$('viewControl').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-view]');
+  if (!b || b.dataset.view === state.view) return;
+  state.view = b.dataset.view;
+  store.set('view', state.view);
+  if (state.data) render();
+  else syncView();
+});
+
 function syncRange() {
   for (const b of $('rangeControl').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.days === String(state.days)));
 }
@@ -351,7 +373,7 @@ async function load({ fresh = false } = {}) {
 
 // ---------- dashboard rendering ----------
 const STRENGTH = /weight|power|strength|functional|crossfit|bodybuild|kettlebell|calisthenic/i;
-const EMPTY_ACT = { workouts: 0, zone13Ms: 0, zone45Ms: 0, strengthMs: 0 };
+const EMPTY_ACT = { workouts: 0, zone13Ms: 0, zone45Ms: 0, strengthMs: 0, kcal: 0, distanceKm: 0, climbM: 0 };
 const restorativeMs = (s) => (s && s.swsMs != null ? (s.swsMs || 0) + (s.remMs || 0) : null);
 const minutes = (ms) => (ms == null ? null : ms / 60_000);
 const fmtMin = (m) => {
@@ -389,6 +411,8 @@ const TREND_FMT = {
   hrvCv: (v) => `${fmt.sig(v)} pts`,
   sri: (v) => `${fmt.sig(v)} pts`,
   stepsDose: (v) => `${fmt.int(v)} steps`,
+  energy: (v) => `${fmt.int(v)} kcal`,
+  distance: (v) => `${fmt.sig(v)} km`,
 };
 // Which direction is healthy for each chart's trend (per series for two-series charts).
 // Charts not listed (strain, skin temp, respiratory rate, sleep timing) stay neutral grey.
@@ -410,6 +434,7 @@ const TREND_BETTER = {
   hrvCv: 'down',
   sri: 'up',
   stepsDose: 'up',
+  distance: 'up',
 };
 function trendInfo(id, spec) {
   const trends = trendLines(spec);
@@ -478,6 +503,9 @@ function withActivity(days, workouts) {
       a.zone45Ms += w.zonesMs[4] + w.zonesMs[5];
     }
     if (STRENGTH.test(w.sport)) a.strengthMs += w.durationMs || 0;
+    if (w.kilojoule != null) a.kcal += w.kilojoule / 4.184;
+    if (w.distanceMeter) a.distanceKm += w.distanceMeter / 1000;
+    if (w.altitudeGainMeter > 0) a.climbM += w.altitudeGainMeter;
     byDate.set(date, a);
   }
   return days.map((d) => ({ ...d, act: byDate.get(d.date) || { ...EMPTY_ACT } }));
@@ -494,10 +522,20 @@ function render() {
   const days = withActivity(d.days, d.workouts).map((x) => ({ ...x, ins: insByDate[x.date] || null }));
   const { rows, unit } = aggregate(days);
   const ctx = { days, rows, unit, maxHr: d.body?.maxHr ?? null, insights: d.insights || null, body: d.body || null, workouts: d.workouts };
-  renderOverview(ctx);
-  renderSections(ctx);
-  renderWorkouts(d.workouts);
-  renderBody(d.body);
+  state.ctx = ctx;
+  syncView();
+  if (state.view === 'cockpit') {
+    $('overview').replaceChildren();
+    $('sections').replaceChildren();
+    renderCockpit(ctx);
+  } else {
+    $('cockpitCanvas').replaceChildren();
+    $('paletteList').replaceChildren();
+    renderOverview(ctx);
+    renderSections(ctx);
+    renderWorkouts(d.workouts);
+    renderBody(d.body);
+  }
 }
 
 function latest(days, pick) {
@@ -536,7 +574,7 @@ function overviewCard({ label, value, unit, chip, meter, sub, empty }) {
   );
   return card;
 }
-function renderOverview({ days }) {
+function overviewCardList({ days }) {
   const cards = [];
   const rec = latest(days, (d) => d.recovery?.score);
   if (rec) {
@@ -578,7 +616,14 @@ function renderOverview({ days }) {
       sub: `${fmt.dur(asleepMs(s))} asleep of ${fmt.dur(s.neededMs)} needed`,
     }));
   } else cards.push(overviewCard({ label: 'Sleep', empty: 'No scored sleep in this range yet.' }));
-  $('overview').replaceChildren(...cards);
+  return [
+    { key: 'recovery', name: 'Recovery today', el: cards[0] },
+    { key: 'strain', name: 'Strain today', el: cards[1] },
+    { key: 'sleep', name: 'Sleep last night', el: cards[2] },
+  ];
+}
+function renderOverview(ctx) {
+  $('overview').replaceChildren(...overviewCardList(ctx).map((c) => c.el));
 }
 
 // ---------- KPI tiles ----------
@@ -831,7 +876,7 @@ function insightsSection({ days, rows, unit, insights }) {
     for (let v = lo; v <= hi; v += step) out.push(v);
     return out.length >= 2 ? out : undefined;
   })();
-  const signalColor = (n) => (n >= 3 ? 'var(--critical)' : n === 2 ? 'var(--warning)' : 'var(--axis)');
+  const signalColor = (n) => (n >= 3 ? 'var(--critical)' : n === 2 ? 'var(--warning)' : 'var(--mark-neutral)');
 
   return {
     id: 'insights',
@@ -956,12 +1001,12 @@ function insightsSection({ days, rows, unit, insights }) {
         peak: true,
         title: 'Illness warning signals',
         subtitle: `Resting HR, HRV, respiratory rate and skin temp unusually far from your last 30 days · ${flagged('warning')} warning and ${flagged('watch')} watch days in this range`,
-        legend: [{ color: 'var(--axis)', label: '1 signal' }, { icon: 'warning', label: '2: watch' }, { icon: 'critical', label: '3–4: warning' }],
+        legend: [{ color: 'var(--mark-neutral)', label: '1 signal' }, { icon: 'warning', label: '2: watch' }, { icon: 'critical', label: '3–4: warning' }],
         spec: {
           type: 'bar',
           data: rows,
           x: (d) => d.date,
-          series: [{ label: 'Signals out of range', value: (d) => d.ins?.signalCount ?? null, color: 'var(--axis)' }],
+          series: [{ label: 'Signals out of range', value: (d) => d.ins?.signalCount ?? null, color: 'var(--mark-neutral)' }],
           colorFor: (d) => signalColor(d.ins?.signalCount ?? 0),
           yTicks: [0, 1, 2, 3, 4],
           ariaLabel: 'Illness warning signals bar chart',
@@ -1318,6 +1363,167 @@ function markersSection({ days, rows, unit, insights, body, workouts }) {
   };
 }
 
+// ---------- energy and distance ----------
+const prettySport = (s) => s.replace(/[-_]+/g, ' ').replace(/^\S/, (c) => c.toUpperCase());
+// Per-day workout calories, also for weekly/monthly buckets (which hold totals in act).
+const workoutKcalPerDay = (d) => (d.bucket ? d.act.kcal / d.bucketDays : d.act.kcal);
+const totalKcal = (d) => kcal(d.kilojoule);
+
+function energySection({ days, rows, unit, workouts }) {
+  const dateCol = { label: unit === 'day' ? 'Date' : unit === 'week' ? 'Week of' : 'Month', value: (d) => periodLabel(d, true) };
+  const per = unit === 'day' ? 'per day' : unit === 'week' ? 'per week' : 'per month';
+  const complete = days.filter((d) => !d.inProgress && d.kilojoule != null);
+  const avgBurn = mean(complete.map(totalKcal));
+  const avgWorkoutKcal = mean(complete.map((d) => d.act.kcal));
+
+  // calories by sport over the selected range
+  const bySport = new Map();
+  for (const w of workouts) {
+    if (w.kilojoule == null) continue;
+    const e = bySport.get(w.sport) || { sport: w.sport, kcal: 0, count: 0, minutes: 0 };
+    e.kcal += w.kilojoule / 4.184;
+    e.count += 1;
+    e.minutes += (w.durationMs || 0) / 60_000;
+    bySport.set(w.sport, e);
+  }
+  const sports = [...bySport.values()].sort((a, b) => b.kcal - a.kcal).slice(0, 8);
+  const workoutKcalTotal = [...bySport.values()].reduce((a, s) => a + s.kcal, 0);
+
+  // last 7 days (including today so far) for the share tile
+  const end = days.at(-1)?.date;
+  const cutoff = end ? new Date(Date.parse(`${end}T12:00:00Z`) - 6 * 86_400_000).toISOString().slice(0, 10) : null;
+  const week = days.filter((d) => d.date >= cutoff);
+  const weekTotal = week.reduce((a, d) => a + (totalKcal(d) || 0), 0);
+  const weekWorkout = week.reduce((a, d) => a + d.act.kcal, 0);
+
+  // Many workouts (auto-detected walks, gym sessions) record no distance, so only show
+  // distance and elevation when this range actually has some.
+  const rangeKm = days.reduce((a, d) => a + d.act.distanceKm, 0);
+  const rangeClimb = days.reduce((a, d) => a + d.act.climbM, 0);
+  const showDistance = rangeKm >= 1;
+
+  return {
+    id: 'energy',
+    title: showDistance ? 'Energy and distance' : 'Energy',
+    tiles: [
+      { label: 'Calories', unit: 'kcal', get: (d) => totalKcal(d), show: fmt.int, diff: int0, better: null, partial: true },
+      { kind: 'week', label: 'Total burn', unit: 'kcal', get: (d) => totalKcal(d), show: fmt.int, diff: int0, better: null },
+      { kind: 'week', label: 'Workout calories', unit: 'kcal', get: (d) => d.act.kcal, show: fmt.int, diff: int0, better: 'up' },
+      {
+        kind: 'custom',
+        label: 'Workout share',
+        unit: '%',
+        show: fmt.int,
+        noDelta: true,
+        emptyText: 'No calories recorded in the last 7 days',
+        compute: () => (weekTotal ? { value: (weekWorkout / weekTotal) * 100, sub: `of the ${fmt.int(weekTotal)} kcal you burned in the last 7 days came from workouts` } : {}),
+      },
+      showDistance && { kind: 'week', label: 'Distance', unit: 'km', get: (d) => d.act.distanceKm, show: fmt.one, diff: num1, better: 'up' },
+      showDistance && rangeClimb > 0 && { kind: 'week', label: 'Elevation gain', unit: 'm', get: (d) => d.act.climbM, show: fmt.int, diff: int0, better: null },
+    ].filter(Boolean),
+    charts: [
+      {
+        id: 'energy',
+        title: 'Calories burned',
+        subtitle: avgBurn == null ? null : `Average ${fmt.int(avgBurn)} kcal a day, ${fmt.int(avgWorkoutKcal)} of it from workouts`,
+        legend: [{ color: 'var(--series-1)', label: 'Rest of day' }, { color: 'var(--series-2)', label: 'Workouts' }],
+        spec: {
+          type: 'stack',
+          data: rows,
+          x: (d) => d.date,
+          series: [
+            { label: 'Rest of day', short: 'Rest', value: (d) => (totalKcal(d) == null ? null : Math.max(0, totalKcal(d) - workoutKcalPerDay(d))), color: 'var(--series-1)' },
+            { label: 'Workouts', short: 'Workouts', value: (d) => (totalKcal(d) == null ? null : Math.min(workoutKcalPerDay(d), totalKcal(d))), color: 'var(--series-2)' },
+          ],
+          yFormat: fmt.compact,
+          trendSkip: (d) => d.inProgress,
+          ariaLabel: 'Daily calories burned stacked bar chart',
+          tooltip: (d) => {
+            const total = totalKcal(d);
+            const work = workoutKcalPerDay(d);
+            return {
+              title: `${periodLabel(d)}${d.inProgress ? ' · so far' : ''}`,
+              rows: total == null
+                ? [{ value: 'No data', label: '' }]
+                : [
+                    { value: `${fmt.int(total)} kcal`, label: d.bucket ? 'Total, daily average' : 'Total' },
+                    { color: 'var(--series-2)', value: `${fmt.int(Math.min(work, total))} kcal`, label: 'Workouts' },
+                    { color: 'var(--series-1)', value: `${fmt.int(Math.max(0, total - work))} kcal`, label: 'Rest of day' },
+                  ],
+            };
+          },
+        },
+        columns: [
+          dateCol,
+          { label: 'Total kcal', num: true, value: (d) => fmt.int(totalKcal(d)) },
+          { label: 'Workouts kcal', num: true, value: (d) => (totalKcal(d) == null ? '–' : fmt.int(workoutKcalPerDay(d))) },
+          { label: 'Rest of day kcal', num: true, value: (d) => (totalKcal(d) == null ? '–' : fmt.int(Math.max(0, totalKcal(d) - workoutKcalPerDay(d)))) },
+        ],
+      },
+      {
+        id: 'sportKcal',
+        fixedAxis: true,
+        title: 'Calories by sport',
+        subtitle: sports.length ? `${fmt.int(workoutKcalTotal)} kcal across ${workouts.length} workouts in this range · top ${sports.length} sports` : 'No workouts in this range',
+        spec: {
+          type: 'bar',
+          trend: false,
+          data: sports,
+          x: (d) => d.sport,
+          xFormat: (s) => prettySport(s),
+          series: [{ label: 'Calories', value: (d) => d.kcal, color: 'var(--series-2)' }],
+          yFormat: fmt.compact,
+          ariaLabel: 'Calories by sport bar chart',
+          emptyText: 'No workouts in this range.',
+          tooltip: (d) => ({
+            title: prettySport(d.sport),
+            rows: [
+              { color: 'var(--series-2)', value: `${fmt.int(d.kcal)} kcal`, label: 'Calories' },
+              { value: fmt.int(d.count), label: d.count === 1 ? 'workout' : 'workouts' },
+              { value: `${fmt.int(d.kcal / d.count)} kcal`, label: 'Per workout' },
+              { value: `${fmt.int(d.kcal / (d.minutes / 60))} kcal`, label: 'Per hour' },
+            ],
+          }),
+        },
+        columns: [
+          { label: 'Sport', value: (d) => prettySport(d.sport) },
+          { label: 'Workouts', num: true, value: (d) => fmt.int(d.count) },
+          { label: 'Calories', num: true, value: (d) => fmt.int(d.kcal) },
+          { label: 'Per workout', num: true, value: (d) => fmt.int(d.kcal / d.count) },
+          { label: 'Per hour', num: true, value: (d) => fmt.int(d.kcal / (d.minutes / 60)) },
+        ],
+      },
+      showDistance && {
+        id: 'distance',
+        totals: true,
+        title: 'Distance',
+        subtitle: `Kilometres ${per} from workouts that record distance (walking, running, cycling and similar)`,
+        spec: {
+          type: 'bar',
+          data: rows,
+          x: (d) => d.date,
+          series: [{ label: 'Distance', value: (d) => d.act.distanceKm, color: 'var(--series-3)' }],
+          yFormat: (v) => `${fmt.auto(v)}`,
+          ariaLabel: 'Distance bar chart',
+          emptyText: 'No workouts with distance in this range.',
+          tooltip: (d) => ({
+            title: periodLabel(d),
+            rows: [
+              { color: 'var(--series-3)', value: `${fmt.one(d.act.distanceKm)} km`, label: 'Distance' },
+              { value: `${fmt.int(d.act.climbM)} m`, label: 'Elevation gain' },
+            ],
+          }),
+        },
+        columns: [
+          dateCol,
+          { label: 'Distance (km)', num: true, value: (d) => fmt.one(d.act.distanceKm) },
+          { label: 'Elevation gain (m)', num: true, value: (d) => fmt.int(d.act.climbM) },
+        ],
+      },
+    ].filter(Boolean),
+  };
+}
+
 function sectionDefs(ctx) {
   const { days, rows, unit, maxHr } = ctx;
   const dateCol = { label: unit === 'day' ? 'Date' : unit === 'week' ? 'Week of' : 'Month', value: (d) => periodLabel(d, true) };
@@ -1531,7 +1737,6 @@ function sectionDefs(ctx) {
       title: 'Strain and activity',
       tiles: [
         { label: 'Day strain', unit: '', get: (d) => d.strain, show: fmt.one, diff: num1, better: null, partial: true },
-        { label: 'Calories', unit: 'kcal', get: (d) => kcal(d.kilojoule), show: fmt.int, diff: int0, better: null, partial: true },
         { label: 'Steps', unit: '', get: (d) => d.steps, show: fmt.int, diff: int0, better: 'up', partial: true, emptyText: 'WHOOP reports steps from Sept 2024' },
         { label: 'Average heart rate', unit: 'bpm', get: (d) => d.avgHr, show: fmt.int, diff: int0, better: null, partial: true },
         { kind: 'week', label: 'Workouts', unit: '', get: (d) => d.act.workouts, show: fmt.int, diff: num1, better: 'up' },
@@ -1641,6 +1846,7 @@ function sectionDefs(ctx) {
         },
       ],
     },
+    energySection(ctx),
     {
       id: 'fitness',
       title: 'Fitness and Healthspan',
@@ -1678,8 +1884,7 @@ function sectionDefs(ctx) {
 }
 
 function renderSections(ctx) {
-  currentUnit = ctx.unit;
-  currentSpanDays = ctx.days.length;
+  setChartContext(ctx);
   const built = sectionDefs(ctx).map((sec) => {
     const cards = sec.charts.map((c) => chartCard(c));
     const el = h('section', { class: 'section', 'aria-labelledby': `sec-${sec.id}` },
@@ -1691,6 +1896,464 @@ function renderSections(ctx) {
   });
   $('sections').replaceChildren(...built.map((b) => b.el));
   built.forEach((b) => b.cards.forEach((c) => c.apply()));
+}
+
+// ---------- cockpit: build your own dashboard by drag and drop ----------
+// The layout is a list of { id, size } saved in this browser. Ids are stable names for every
+// overview card, tile, chart and table the dashboard can draw, so a saved layout survives
+// reloads and range changes. Size is a column span on a 12-column grid.
+const COCKPIT_KEY = 'cockpit.v1';
+const SIZES = { card: [4, 6, 12], tile: [3, 4, 6], chart: [6, 12], table: [6, 12], divider: [12] };
+const SIZE_NAME = { 3: 'quarter', 4: 'third', 6: 'half', 12: 'full' };
+const KIND_NAME = { card: 'Card', tile: 'Tile', chart: 'Chart', table: 'Table', divider: 'Layout' };
+const SUGGESTED = [
+  { title: 'Today' },
+  ['ov:recovery', 4], ['ov:strain', 4], ['ov:sleep', 4],
+  { title: 'Warning signs' },
+  ['tile:insights:hrv-versus-baseline', 3], ['tile:insights:illness-warning', 3],
+  ['tile:insights:training-load-ratio', 3], ['tile:markers:sleep-regularity', 3],
+  { title: 'Trends' },
+  ['chart:hrvBase', 6], ['chart:recovery', 6], ['chart:sleep', 6], ['chart:energy', 6],
+];
+// Dividers are layout-only: any number of them, each with its own id and editable title.
+const DIVIDER = { id: 'divider', name: 'Section divider', kind: 'divider' };
+const isDivider = (id) => id.startsWith('div:');
+const newDividerId = () => `div:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+let dragPayload = null; // { add: id } from the palette, or { move: index } within the canvas
+let pendingFocus = null; // re-focus a control after a button-driven re-render
+
+// Several named cockpits: { activeId, list: [{ id, name, items }] }. state.cockpit always
+// holds the active cockpit's items; saveCockpit() writes them back with all the others.
+const COCKPITS_KEY = 'cockpits.v1';
+const newCockpitId = () => `ck:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+const cleanName = (s) => String(s ?? '').replace(/\s+/g, ' ').slice(0, 40);
+
+function sanitizeItems(v) {
+  return Array.isArray(v)
+    ? v.filter((x) => x && typeof x.id === 'string' && Number.isFinite(x.size)).map((x) => (isDivider(x.id) ? { ...x, title: typeof x.title === 'string' ? x.title.slice(0, 80) : '' } : x))
+    : [];
+}
+function loadCockpit() {
+  try {
+    const v = JSON.parse(store.get(COCKPIT_KEY) || 'null');
+    return Array.isArray(v) ? sanitizeItems(v) : null;
+  } catch {
+    return null;
+  }
+}
+function loadCockpits() {
+  try {
+    const v = JSON.parse(store.get(COCKPITS_KEY) || 'null');
+    if (v && Array.isArray(v.list)) {
+      const list = v.list
+        .filter((c) => c && typeof c.id === 'string')
+        .map((c) => ({ id: c.id, name: cleanName(c.name) || 'Cockpit', items: sanitizeItems(c.items) }));
+      if (list.length) return { activeId: list.some((c) => c.id === v.activeId) ? v.activeId : list[0].id, list };
+    }
+  } catch {
+    // fall through to a fresh start
+  }
+  const first = { id: newCockpitId(), name: 'My cockpit', items: loadCockpit() || [] };
+  return { activeId: first.id, list: [first] };
+}
+const activeCockpit = () => state.cockpits.list.find((c) => c.id === state.cockpits.activeId);
+function saveCockpit() {
+  activeCockpit().items = state.cockpit;
+  store.set(COCKPITS_KEY, JSON.stringify(state.cockpits));
+}
+function selectCockpit(id, focus) {
+  if (!state.cockpits.list.some((c) => c.id === id)) return;
+  state.cockpits.activeId = id;
+  state.cockpit = activeCockpit().items;
+  saveCockpit();
+  pendingFocus = focus || { act: 'tab' };
+  renderCockpit(state.ctx);
+}
+function addCockpit(name, items) {
+  const taken = new Set(state.cockpits.list.map((c) => c.name));
+  let n = state.cockpits.list.length + 1;
+  let finalName = name;
+  while (!finalName || taken.has(finalName)) finalName = `${name || 'Cockpit'} ${n++}`;
+  const c = { id: newCockpitId(), name: cleanName(finalName), items };
+  state.cockpits.list.push(c);
+  state.editing = true;
+  store.set('cockpit.editing', '1');
+  selectCockpit(c.id, { act: 'cockpitName' });
+}
+
+// Tabs for every saved cockpit, and the title: plain heading, or a name field while editing.
+function renderCockpitHeader() {
+  const active = activeCockpit();
+  $('cockpitTabs').replaceChildren(...state.cockpits.list.map((c) => h('button', {
+    type: 'button',
+    class: 'cockpit-tab',
+    title: c.name || 'Untitled cockpit',
+    'data-cockpit': c.id,
+    'aria-pressed': String(c.id === active.id),
+    onclick: () => selectCockpit(c.id),
+  }, c.name || 'Untitled cockpit')));
+  if (state.editing) {
+    const input = h('input', { type: 'text', id: 'cockpitNameInput', class: 'cockpit-name', value: active.name, maxlength: '40', placeholder: 'Cockpit name' });
+    input.addEventListener('input', () => {
+      active.name = cleanName(input.value);
+      saveCockpit();
+      const tab = $('cockpitTabs').querySelector(`[data-cockpit="${CSS.escape(active.id)}"]`);
+      if (tab) tab.textContent = active.name || 'Untitled cockpit';
+    });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') input.blur(); });
+    input.addEventListener('blur', () => {
+      if (!active.name.trim()) {
+        active.name = 'Untitled cockpit';
+        input.value = active.name;
+        saveCockpit();
+        renderCockpitHeader();
+      }
+    });
+    $('cockpitTitle').replaceChildren(input);
+  } else {
+    $('cockpitTitle').replaceChildren();
+  }
+  $('cockpitEditRow').hidden = !state.editing;
+  $('cockpitDuplicate').hidden = !state.editing;
+  $('cockpitDelete').hidden = !state.editing;
+  $('cockpitDelete').disabled = state.cockpits.list.length < 2;
+  $('cockpitDelete').title = state.cockpits.list.length < 2 ? 'You need at least one cockpit' : '';
+}
+
+function setChartContext(ctx) {
+  currentUnit = ctx.unit;
+  currentSpanDays = ctx.days.length;
+}
+
+// Every widget the dashboard can draw, grouped like the dashboard's sections.
+function buildCatalog(ctx) {
+  setChartContext(ctx);
+  const groups = [{
+    title: 'Today',
+    items: overviewCardList(ctx).map((o) => ({ id: `ov:${o.key}`, name: o.name, kind: 'card', make: () => ({ el: o.el }) })),
+  }];
+  for (const sec of sectionDefs(ctx)) {
+    const items = [];
+    for (const t of sec.tiles) {
+      const base = t.label.split(' · ')[0];
+      items.push({ id: `tile:${sec.id}:${slug(base)}`, name: t.kind === 'week' ? `${base} (7 days)` : base, kind: 'tile', make: () => ({ el: tileEl(t, ctx.days) }) });
+    }
+    for (const c of sec.charts) {
+      items.push({ id: `chart:${c.id}`, name: c.title, kind: 'chart', make: () => { const cc = chartCard(c); return { el: cc.card, apply: cc.apply }; } });
+    }
+    for (const el of sec.extra || []) {
+      const name = el.querySelector('h3')?.textContent;
+      if (name) items.push({ id: `extra:${sec.id}:${slug(name)}`, name, kind: 'table', make: () => ({ el }) });
+    }
+    groups.push({ title: sec.title, items });
+  }
+  return groups;
+}
+
+function cockpitIcon(name) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  for (const [k, v] of Object.entries({ width: '16', height: '16', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) svg.setAttribute(k, v);
+  const paths = {
+    grip: ['M9 6h.01', 'M9 12h.01', 'M9 18h.01', 'M15 6h.01', 'M15 12h.01', 'M15 18h.01'],
+    left: ['M15 18l-6-6 6-6'],
+    right: ['M9 18l6-6-6-6'],
+    width: ['M3 12h18', 'M7 8l-4 4 4 4', 'M17 8l4 4-4 4'],
+    remove: ['M18 6 6 18', 'M6 6l12 12'],
+    plus: ['M12 5v14', 'M5 12h14'],
+  }[name];
+  for (const d of paths) {
+    const p = document.createElementNS(NS, 'path');
+    p.setAttribute('d', d);
+    svg.appendChild(p);
+  }
+  return svg;
+}
+
+function updateCockpit(mutator, focus) {
+  const next = state.cockpit.slice();
+  mutator(next);
+  state.cockpit = next;
+  saveCockpit();
+  pendingFocus = focus || null;
+  renderCockpit(state.ctx);
+}
+
+function addWidget(item, index) {
+  if (item.kind === 'divider') {
+    const id = newDividerId();
+    updateCockpit((list) => list.splice(index ?? list.length, 0, { id, size: 12, title: 'New section' }), { id, act: 'title' });
+    return;
+  }
+  if (state.cockpit.some((x) => x.id === item.id)) return;
+  updateCockpit((list) => list.splice(index ?? list.length, 0, { id: item.id, size: SIZES[item.kind][0] }), { id: item.id, act: 'name' });
+}
+function renameDivider(id, title) {
+  const entry = state.cockpit.find((x) => x.id === id);
+  if (!entry) return;
+  entry.title = title.slice(0, 80);
+  saveCockpit(); // no re-render, so typing keeps focus
+}
+function moveWidget(from, to, act) {
+  if (to < 0 || to >= state.cockpit.length || from === to) return;
+  const id = state.cockpit[from].id;
+  updateCockpit((list) => list.splice(to, 0, list.splice(from, 1)[0]), act ? { id, act } : null);
+}
+
+function clearDropMarks() {
+  for (const n of document.querySelectorAll('.drop-before, .drop-after, .drop-above, .drop-below, .drag-over')) n.classList.remove('drop-before', 'drop-after', 'drop-above', 'drop-below', 'drag-over');
+}
+// Where a drop lands: before or after the widget under the pointer, else at the end.
+function dropTarget(e) {
+  const w = e.target.closest?.('.cw');
+  if (!w || !$('cockpitCanvas').contains(w)) return { index: state.cockpit.length, el: null };
+  const r = w.getBoundingClientRect();
+  const fullRow = r.width > $('cockpitCanvas').getBoundingClientRect().width * 0.9;
+  const after = fullRow ? e.clientY > r.top + r.height / 2 : e.clientX > r.left + r.width / 2;
+  const side = fullRow ? (after ? 'below' : 'above') : after ? 'after' : 'before';
+  return { index: Number(w.dataset.index) + (after ? 1 : 0), el: w, side };
+}
+
+function widgetEl(item, entry, index, total) {
+  const size = SIZES[item.kind].includes(entry.size) ? entry.size : SIZES[item.kind][0];
+  const w = h('div', { class: `cw span-${size}`, 'data-id': item.id, 'data-index': String(index), 'data-kind': item.kind });
+  if (!state.editing) return w;
+
+  const btn = (act, icon, label, onclick, disabled) => {
+    const b = h('button', { type: 'button', class: 'cw-btn', 'data-act': act, 'aria-label': label, title: label, disabled: disabled || null, onclick }, cockpitIcon(icon));
+    return b;
+  };
+  const sizes = SIZES[item.kind];
+  const nextSize = sizes[(sizes.indexOf(size) + 1) % sizes.length];
+  const divider = item.kind === 'divider';
+  let title = null;
+  if (divider) {
+    title = h('input', { type: 'text', class: 'cw-title', value: entry.title ?? '', maxlength: '80', placeholder: 'Section name', 'aria-label': 'Section name', 'data-act': 'title' });
+    title.addEventListener('input', () => renameDivider(item.id, title.value));
+    title.addEventListener('keydown', (e) => { if (e.key === 'Enter') title.blur(); });
+  }
+  // Text fields inside a draggable element can't be selected with the mouse, so a divider
+  // drags by its grip; other cards drag by the whole toolbar.
+  const grip = h('span', { class: 'cw-grip', draggable: divider ? 'true' : null, title: divider ? 'Drag to move' : null }, cockpitIcon('grip'));
+  const bar = h('div', { class: `cw-bar${divider ? ' is-divider' : ''}`, draggable: divider ? null : 'true', title: divider ? null : 'Drag to move' },
+    grip,
+    divider ? title : h('span', { class: 'cw-name', text: item.name }),
+    btn('left', 'left', `Move ${item.name} earlier`, () => moveWidget(index, index - 1, 'left'), index === 0),
+    btn('right', 'right', `Move ${item.name} later`, () => moveWidget(index, index + 1, 'right'), index === total - 1),
+    sizes.length > 1 ? btn('width', 'width', `Make ${item.name} ${SIZE_NAME[nextSize]} width (now ${SIZE_NAME[size]})`, () => updateCockpit((list) => { list[index] = { ...list[index], size: nextSize }; }, { id: item.id, act: 'width' })) : null,
+    btn('remove', 'remove', `Remove ${item.name}`, () => updateCockpit((list) => list.splice(index, 1), { act: 'canvas' })),
+  );
+  const dragSource = divider ? grip : bar;
+  dragSource.addEventListener('dragstart', (e) => {
+    if (e.target.closest('button, input')) return; // let buttons and fields be themselves
+    dragPayload = { move: index };
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', item.id);
+    e.dataTransfer.setDragImage(w, 24, 18);
+    requestAnimationFrame(() => w.classList.add('dragging'));
+  });
+  dragSource.addEventListener('dragend', () => {
+    dragPayload = null;
+    w.classList.remove('dragging');
+    clearDropMarks();
+  });
+  w.append(bar);
+  return w;
+}
+
+// A divider outside edit mode is a plain section heading.
+function dividerEl(entry) {
+  return h('div', { class: 'cockpit-divider' }, h('h2', { class: 'section-title', text: entry.title?.trim() || 'Untitled section' }));
+}
+
+function renderPalette(catalog) {
+  const used = new Set(state.cockpit.map((x) => x.id));
+  const list = $('paletteList');
+  const groups = [{ title: 'Layout', items: [DIVIDER] }, ...catalog];
+  list.replaceChildren(...groups.map((g) => h('section', { class: 'palette-group' },
+    h('h3', { text: g.title }),
+    h('ul', {}, g.items.map((item) => {
+      const added = used.has(item.id);
+      const li = h('li', { class: `palette-item${added ? ' is-added' : ''}`, draggable: added ? 'false' : 'true', 'data-name': item.name.toLowerCase(), 'data-id': item.id },
+        h('span', { class: 'cw-grip' }, cockpitIcon('grip')),
+        h('span', { class: 'palette-name', text: item.name }),
+        h('span', { class: 'palette-kind', text: KIND_NAME[item.kind] }),
+        h('button', { type: 'button', class: 'palette-add', 'data-act': 'add', disabled: added || null, 'aria-label': added ? `${item.name} is in your cockpit` : `Add ${item.name}`, title: added ? 'Already in your cockpit' : 'Add to cockpit', onclick: () => addWidget(item) }, cockpitIcon('plus')),
+      );
+      if (!added) {
+        li.addEventListener('dragstart', (e) => {
+          dragPayload = { add: item.id, item };
+          e.dataTransfer.effectAllowed = 'copy';
+          e.dataTransfer.setData('text/plain', item.id);
+          li.classList.add('dragging');
+        });
+        li.addEventListener('dragend', () => {
+          dragPayload = null;
+          li.classList.remove('dragging');
+          clearDropMarks();
+        });
+      }
+      return li;
+    })),
+  )));
+  filterPalette();
+}
+
+function filterPalette() {
+  const q = $('paletteSearch').value.trim().toLowerCase();
+  for (const g of document.querySelectorAll('.palette-group')) {
+    let any = false;
+    for (const li of g.querySelectorAll('.palette-item')) {
+      const show = !q || li.dataset.name.includes(q);
+      li.hidden = !show;
+      any ||= show;
+    }
+    g.hidden = !any;
+  }
+}
+
+function renderCockpit(ctx) {
+  if (!ctx) return;
+  const catalog = buildCatalog(ctx);
+  const byId = new Map(catalog.flatMap((g) => g.items).map((it) => [it.id, it]));
+  // drop saved widgets the dashboard no longer has
+  const kept = state.cockpit.filter((x) => byId.has(x.id) || isDivider(x.id));
+  if (kept.length !== state.cockpit.length) {
+    state.cockpit = kept;
+    saveCockpit();
+  }
+
+  renderCockpitHeader();
+  $('cockpitBody').classList.toggle('is-editing', state.editing);
+  $('cockpitPalette').hidden = !state.editing;
+  $('cockpitEdit').textContent = state.editing ? 'Done' : 'Edit layout';
+  $('cockpitEdit').classList.toggle('primary', state.editing);
+  $('cockpitSuggest').hidden = !state.editing;
+  $('cockpitClear').hidden = !state.editing || !state.cockpit.length;
+  $('cockpitHint').textContent = state.editing
+    ? 'Drag KPIs from the left into your cockpit and drag them around to reorder. The buttons on each card do the same without a mouse.'
+    : '';
+  if (state.editing) renderPalette(catalog);
+
+  const canvas = $('cockpitCanvas');
+  canvas.classList.toggle('is-empty', !state.cockpit.length);
+  const toApply = [];
+  const nodes = state.cockpit.map((entry, i) => {
+    if (isDivider(entry.id)) {
+      const item = { id: entry.id, name: entry.title?.trim() || 'Untitled section', kind: 'divider' };
+      const w = widgetEl(item, entry, i, state.cockpit.length);
+      w.classList.add('cw-divider');
+      if (!state.editing) w.append(dividerEl(entry));
+      return w;
+    }
+    const item = byId.get(entry.id);
+    const made = item.make();
+    const w = widgetEl(item, entry, i, state.cockpit.length);
+    w.append(made.el);
+    if (made.apply) toApply.push(made.apply);
+    return w;
+  });
+  if (!nodes.length) {
+    nodes.push(h('div', { class: 'cockpit-empty' },
+      h('p', { class: 'cockpit-empty-title', text: 'Your cockpit is empty' }),
+      h('p', { class: 'muted', text: state.editing ? 'Drag KPIs here from the list on the left, or start from the suggested layout.' : 'Choose Edit layout to add KPIs.' }),
+    ));
+  }
+  canvas.replaceChildren(...nodes);
+  toApply.forEach((f) => f());
+
+  if (pendingFocus) {
+    const f = pendingFocus;
+    pendingFocus = null;
+    const target = f.act === 'cockpitName'
+      ? $('cockpitNameInput')
+      : f.act === 'tab'
+        ? $('cockpitTabs').querySelector('[aria-pressed="true"]')
+        : f.act === 'canvas'
+      ? canvas.querySelector('.cw-btn') || $('paletteSearch')
+      : canvas.querySelector(`.cw[data-id="${CSS.escape(f.id)}"] [data-act="${f.act}"]:not([disabled])`) || canvas.querySelector(`.cw[data-id="${CSS.escape(f.id)}"] .cw-btn`);
+    target?.focus();
+    if (target?.select) target.select();
+  }
+}
+
+// One-time wiring for drop zones and toolbar buttons (the elements persist across renders).
+function initCockpit() {
+  const canvas = $('cockpitCanvas');
+  canvas.addEventListener('dragover', (e) => {
+    if (!dragPayload) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = dragPayload.add ? 'copy' : 'move';
+    const t = dropTarget(e);
+    clearDropMarks();
+    if (t.el) t.el.classList.add(`drop-${t.side}`);
+    else canvas.classList.add('drag-over');
+  });
+  canvas.addEventListener('dragleave', (e) => {
+    if (!canvas.contains(e.relatedTarget)) clearDropMarks();
+  });
+  canvas.addEventListener('drop', (e) => {
+    if (!dragPayload) return;
+    e.preventDefault();
+    const t = dropTarget(e);
+    const payload = dragPayload;
+    dragPayload = null;
+    clearDropMarks();
+    if (payload.add) addWidget(payload.item, t.index);
+    else if (payload.move != null) moveWidget(payload.move, t.index > payload.move ? t.index - 1 : t.index);
+  });
+
+  // dragging a card back onto the palette removes it
+  const palette = $('cockpitPalette');
+  palette.addEventListener('dragover', (e) => {
+    if (dragPayload?.move == null) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    palette.classList.add('drag-over');
+  });
+  palette.addEventListener('dragleave', (e) => {
+    if (!palette.contains(e.relatedTarget)) palette.classList.remove('drag-over');
+  });
+  palette.addEventListener('drop', (e) => {
+    if (dragPayload?.move == null) return;
+    e.preventDefault();
+    const index = dragPayload.move;
+    dragPayload = null;
+    clearDropMarks();
+    updateCockpit((list) => list.splice(index, 1));
+  });
+
+  $('paletteSearch').addEventListener('input', filterPalette);
+  $('cockpitNew').addEventListener('click', () => addCockpit('New cockpit', []));
+  $('cockpitDuplicate').addEventListener('click', () => {
+    const src = activeCockpit();
+    const items = src.items.map((x) => (isDivider(x.id) ? { ...x, id: newDividerId() } : { ...x }));
+    addCockpit(`${src.name} copy`, items);
+  });
+  $('cockpitDelete').addEventListener('click', () => {
+    if (state.cockpits.list.length < 2) return;
+    const c = activeCockpit();
+    if (!window.confirm(`Delete the cockpit "${c.name}"? This can't be undone.`)) return;
+    const i = state.cockpits.list.indexOf(c);
+    state.cockpits.list.splice(i, 1);
+    selectCockpit(state.cockpits.list[Math.max(0, i - 1)].id);
+  });
+  $('cockpitEdit').addEventListener('click', () => {
+    state.editing = !state.editing;
+    store.set('cockpit.editing', state.editing ? '1' : '0');
+    renderCockpit(state.ctx);
+  });
+  $('cockpitSuggest').addEventListener('click', () => {
+    if (state.cockpit.length && !window.confirm('Replace your cockpit with the suggested layout?')) return;
+    const known = new Set(buildCatalog(state.ctx).flatMap((g) => g.items).map((it) => it.id));
+    const layout = SUGGESTED.map((x) => (Array.isArray(x) ? (known.has(x[0]) ? { id: x[0], size: x[1] } : null) : { id: newDividerId(), size: 12, title: x.title })).filter(Boolean);
+    updateCockpit((list) => list.splice(0, list.length, ...layout));
+  });
+  $('cockpitClear').addEventListener('click', () => {
+    if (!window.confirm('Remove every KPI from your cockpit?')) return;
+    updateCockpit((list) => list.splice(0, list.length), { act: 'canvas' });
+  });
 }
 
 // ---------- workouts ----------
@@ -1802,4 +2465,9 @@ window.addEventListener('focus', async () => {
   }
 });
 
+state.cockpits = loadCockpits();
+state.cockpit = activeCockpit().items;
+store.set(COCKPITS_KEY, JSON.stringify(state.cockpits)); // persist a migrated layout right away
+state.editing = store.get('cockpit.editing') === '1' || !state.cockpit.length;
+initCockpit();
 boot();

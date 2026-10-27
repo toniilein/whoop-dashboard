@@ -2,7 +2,7 @@
   "name": "whoop-dashboard",
   "version": "1.0.0",
   "private": true,
-  "description": "Local dashboard for WHOOP recovery, sleep, strain and workouts",
+  "description": "Local dashboard and MCP server for WHOOP data: recovery, sleep, strain, workouts and evidence-based health markers",
   "type": "module",
   "engines": {
     "node": ">=20.12"
@@ -10,6 +10,11 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "export": "node export.js"
+    "export": "node export.js",
+    "mcp": "node mcp.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.4.0",
+    "zod": "^4.6.7"
   }
 }
