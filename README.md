@@ -94,18 +94,20 @@ plenty for you and a few friends.
 
 ## How it works
 
-A small Node.js server on your computer fetches your data from the WHOOP API,
-caches your full history and computes the insights. The browser dashboard, the
-export and the MCP server all share that core. Apart from the answers you choose to
-share with Claude through the MCP server, your data stays on your machine.
+1. **Sync.** You log in to WHOOP once. The dashboard downloads your whole history to
+   your computer, then only fetches what's new.
+2. **Analyze.** It works out your personal baselines, trends and early warnings.
+3. **Use it.** See it on the dashboard, shape your own cockpit, export everything, or
+   ask Claude about it.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.png">
-  <img alt="Architecture: the browser, a terminal and Claude call server.js, export.js and mcp.js on your computer. All three use the shared core in lib/, which stores data locally and calls the WHOOP Developer API over HTTPS." src="docs/architecture-light.png">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/how-it-works-dark.png">
+  <img alt="How it works: your WHOOP account syncs to your computer, where your data is analyzed and then used four ways: the dashboard, your own cockpit, an export, and questions to Claude." src="docs/how-it-works-light.png">
 </picture>
 
-The diagram is an [Excalidraw](https://excalidraw.com) file, so you can open and
-edit [docs/architecture.excalidraw](docs/architecture.excalidraw) there.
+Your data stays on your computer. The dashboard only talks to WHOOP, and to Claude
+when you ask it something through the MCP server. Developers can find the technical
+architecture in the [contributing guide](CONTRIBUTING.md#how-the-code-is-organized).
 
 ## Privacy and security
 

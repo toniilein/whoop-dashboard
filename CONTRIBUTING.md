@@ -79,12 +79,17 @@ node scripts/screenshots.mjs
 It needs Google Chrome. Set `CHROME_PATH` to use another Chromium-based browser, or
 `DASHBOARD_URL` if the dashboard runs on another port.
 
-## Updating the architecture diagram
+## Updating the diagrams
 
-The diagram's source is [docs/architecture.excalidraw](docs/architecture.excalidraw).
+There are two diagrams, both drawn in [Excalidraw](https://excalidraw.com):
+
+| Diagram | Source | Shown in |
+|---|---|---|
+| How it works, for users | [docs/how-it-works.excalidraw](docs/how-it-works.excalidraw) | README |
+| Technical architecture | [docs/architecture.excalidraw](docs/architecture.excalidraw) | This guide |
 
 1. Open [excalidraw.com](https://excalidraw.com), choose **Open** from the menu and
-   pick the file.
-2. Make your changes, then save the scene back to `docs/architecture.excalidraw`.
-3. Export it as PNG at 2× scale to `docs/architecture-light.png`. Export it again
-   with **Dark mode** switched on to `docs/architecture-dark.png`.
+   pick the source file.
+2. Make your changes, then save the scene back to the same file.
+3. Export it as PNG at 2× scale to `docs/<name>-light.png`. Export it again with
+   **Dark mode** switched on to `docs/<name>-dark.png`.
