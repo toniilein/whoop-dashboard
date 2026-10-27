@@ -51,7 +51,13 @@ const anchorOf = (data) => data.days.at(-1)?.date;
 const zoneOf = (s) => (s == null ? null : s >= 67 ? 'green' : s >= 34 ? 'yellow' : 'red');
 const strainLevel = (s) => (s == null ? null : s >= 18 ? 'all out' : s >= 14 ? 'high' : s >= 10 ? 'moderate' : 'light');
 const h2 = (ms) => round(ms == null ? null : ms / 3_600_000, 2);
-const clockOf = (m) => formatValue('bedtime', m);
+// Chronotype's MSFsc counts minutes after midnight, unlike bedtime and wake time,
+// which count from 18:00, so it needs its own formatter.
+const clockFromMidnight = (m) => {
+  if (m == null || !Number.isFinite(m)) return null;
+  const total = ((Math.round(m) % 1440) + 1440) % 1440;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+};
 
 function daySummary(d) {
   const r = d.recovery;
@@ -99,7 +105,7 @@ function currentInsights(data) {
   if (c.hrvCv) out.hrv_stability = { date: c.hrvCv.date, cv_pct: round(c.hrvCv.value, 1), usual_range_pct: c.hrvCv.lo == null ? null : [round(c.hrvCv.lo, 1), round(c.hrvCv.hi, 1)], status: c.hrvCv.status, note: 'Higher means less stable day to day' };
   if (c.sri) out.sleep_regularity = { date: c.sri.date, index: round(c.sri.value, 0), reference: 'UK Biobank median 81; bottom fifth < 71.6; top fifth > 87.3' };
   if (c.steps) out.step_dose = { date: c.steps.date, seven_day_avg: round(c.steps.mean7, 0), share_of_last_30_days_at_7000_plus: round(c.steps.share7k30, 2), reference: 'Benefit levels off around 8,000-10,000 a day under age 60' };
-  if (c.chronotype) out.chronotype = { type: c.chronotype.type, mid_sleep_free_days: clockOf(c.chronotype.msfsc), free_nights: c.chronotype.freeNights, work_nights: c.chronotype.workNights, note: 'MSFsc over the last 8 weeks; invalid if an alarm is used on weekends' };
+  if (c.chronotype) out.chronotype = { type: c.chronotype.type, mid_sleep_free_days: clockFromMidnight(c.chronotype.msfsc), free_nights: c.chronotype.freeNights, work_nights: c.chronotype.workNights, note: 'MSFsc over the last 8 weeks; invalid if an alarm is used on weekends' };
   return out;
 }
 
