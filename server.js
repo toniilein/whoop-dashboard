@@ -8,7 +8,7 @@ import { createWhoopClient, AuthRequiredError, WhoopApiError } from './lib/whoop
 import { fetchDashboard, buildPayload } from './lib/dashboard.js';
 import { createHistory } from './lib/history.js';
 import { computeInsights } from './lib/insights.js';
-import { demoPayload } from './lib/demo.js';
+import { demoResponse } from './lib/demo.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 if (existsSync(path.join(ROOT, '.env'))) process.loadEnvFile(path.join(ROOT, '.env'));
@@ -246,10 +246,7 @@ async function handle(req, res) {
 
   if (req.method === 'GET' && url.pathname === '/api/demo') {
     const days = parseDays(url);
-    const payload = demoPayload(days === 'all' ? 400 : days);
-    const full = demoPayload(400);
-    payload.insights = computeInsights(full.days, full.workouts, payload.days.map((d) => d.date), full.body?.maxHr);
-    return send(res, 200, payload);
+    return send(res, 200, demoResponse(days));
   }
 
   return send(res, 404, 'Not found');

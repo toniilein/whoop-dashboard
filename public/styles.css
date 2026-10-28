@@ -151,6 +151,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .btn.ghost { background: transparent; }
 .btn.ghost:hover { background: var(--surface-2); }
 .btn.small { padding: 4px 10px; font-size: 13px; }
+a.btn { display: inline-flex; align-items: center; text-decoration: none; }
+.notice a, .foot a { color: var(--accent); font-weight: 600; }
 .btn[disabled] { opacity: 0.55; cursor: progress; }
 .linkbtn { font: inherit; font-size: 13px; background: none; border: 0; color: var(--accent); cursor: pointer; padding: 4px 0; }
 

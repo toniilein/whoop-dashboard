@@ -4,8 +4,18 @@
     {
       "name": "whoop-dashboard",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["server.js"],
+      "runtimeArgs": [
+        "server.js"
+      ],
       "port": 3000
+    },
+    {
+      "name": "demo-site",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "scripts/preview-site.mjs"
+      ],
+      "port": 8765
     }
   ]
 }

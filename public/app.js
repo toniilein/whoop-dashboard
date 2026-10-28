@@ -1,5 +1,9 @@
 import { renderChart, trendLines } from './charts.js';
 
+// The static demo site (GitHub Pages) has no server: it generates the sample data in the
+// browser with the same code the local server uses, and never connects to WHOOP.
+const STATIC_DEMO = document.documentElement.dataset.mode === 'static-demo';
+
 const $ = (id) => document.getElementById(id);
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -195,7 +199,7 @@ function showView(name) {
   const real = name === 'dash' && !state.demo;
   $('refreshBtn').hidden = !real;
   $('logoutBtn').hidden = !real;
-  $('exitDemoBtn').hidden = !(name === 'dash' && state.demo);
+  $('exitDemoBtn').hidden = STATIC_DEMO || !(name === 'dash' && state.demo);
   if (name !== 'connect') stopPolling();
 }
 
@@ -346,13 +350,18 @@ async function openDashboard() {
   await load();
 }
 
+async function staticDemo(days) {
+  const { demoResponse } = await import('./lib/demo.js');
+  return { res: { ok: true, status: 200 }, body: demoResponse(days === 'all' ? 'all' : Number(days)) };
+}
+
 async function load({ fresh = false } = {}) {
   const id = ++state.requestId;
   setLoading(true);
   if (isAll() && !state.demo) $('updatedAt').textContent = 'Loading full history…';
   try {
     const url = state.demo ? `/api/demo?days=${state.days}` : `/api/dashboard?days=${state.days}${fresh ? '&fresh=1' : ''}`;
-    const { res, body } = await getJSON(url);
+    const { res, body } = STATIC_DEMO ? await staticDemo(state.days) : await getJSON(url);
     if (id !== state.requestId) return; // a newer request superseded this one
     if (res.status === 401) {
       state.data = null;
@@ -2566,6 +2575,10 @@ function renderBody(body) {
 
 // ---------- boot ----------
 async function boot() {
+  if (STATIC_DEMO) {
+    state.demo = true;
+    return openDashboard();
+  }
   const params = new URLSearchParams(location.search);
   const loginError = params.get('login_error');
   const wantDemo = params.has('demo');

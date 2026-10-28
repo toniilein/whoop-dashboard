@@ -67,6 +67,26 @@ For the MCP server, run `npm install` once, then see the [MCP guide](docs/mcp.md
 - Check it with sample data, and with an empty range if your change touches charts.
 - If the change is visible, regenerate the screenshots as described below.
 
+## The live demo
+
+The [live demo](https://toniilein.github.io/whoop-dashboard/) is the same dashboard in a
+static mode: `lib/demo.js` generates the sample data in the browser, so it needs no server
+and never touches real data. GitHub Actions rebuilds it on every push to `main`
+(`.github/workflows/pages.yml`).
+
+To build it, or to build and preview it at the same path GitHub Pages uses:
+
+```bash
+node scripts/build-site.mjs
+```
+
+```bash
+node scripts/preview-site.mjs
+```
+
+The preview runs at http://localhost:8765/whoop-dashboard/. Keep the dashboard's
+sample-data code free of Node-only APIs, because the demo runs it in the browser.
+
 ## Updating the screenshots
 
 The screenshots in `docs/screenshots/` are made from sample data only. The script

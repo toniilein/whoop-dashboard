@@ -4,6 +4,9 @@
 research-backed health markers, a drag-and-drop cockpit, a full-history export,
 and an MCP server so Claude can answer questions about your data.
 
+**[Try the live demo](https://toniilein.github.io/whoop-dashboard/)** in your browser. It runs
+on sample data, so you don't need a WHOOP or any setup.
+
 ![The dashboard with sample data: today's recovery, strain and sleep, and the health markers](docs/screenshots/dashboard-light.png)
 
 > Uses the official [WHOOP Developer API](https://developer.whoop.com). Not
